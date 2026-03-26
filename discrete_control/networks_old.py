@@ -13,80 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Various networks for Jax Dopamine agents.
-
-# ==============================================================================
-# Migration changelog (networks_old.py -> networks.py)
-# Target: Python 3.12 | Flax >= 0.12.1 | JAX >= 0.9.1
-# ==============================================================================
-#
-# Requirements migration notes applicability:
-#   [1] from __future__ : N/A
-#   [2] jax.tree_leaves  : N/A
-#   [3] env.step() 5-tuple : N/A — no gymnasium usage
-#   [4] ALE registration  : N/A for this file directly; atari_lib is imported
-#       but never calls gymnasium.make() here. Registration is handled at the
-#       entry point in eval_run_experiment.py (CHG-1 there).
-#   [5] flax merge_param  : APPLIED — see CHG-1 below
-#   [6] FrozenDict        : N/A
-#
-# [CHG-1] merge_param removed in Flax >= 0.7.2
-#   Location : module-level import
-#   Old      : from flax.linen.module import Module, compact, merge_param
-#   New      : from flax.linen.module import compact
-#   Reason   : flax.linen.module.merge_param was removed in Flax >= 0.7.2.
-#              Importing it raises ImportError at module load time, preventing
-#              the entire networks module from being imported.
-#              merge_param was never called anywhere in this file — it was a
-#              leftover import from an earlier BatchNorm implementation that
-#              used merge_param('use_running_average', ...) before
-#              NoStatsBatchNorm replaced it. Module (bare) is also unused since
-#              all class definitions already inherit from nn.Module.
-#   Impact   : ImportError at startup is eliminated. No behavioral change since
-#              merge_param was never called.
-#
-# [CHG-2] Duplicate 'import jax.numpy as jnp'
-#   Location : import block (second occurrence)
-#   Old      : import jax.numpy as jnp  (appeared twice)
-#   New      : single import retained
-#   Reason   : Harmless but redundant. Removed for clarity.
-#   Impact   : None.
-#
-# [CHG-3] Unused 'atari_lib' import noted
-#   Location : 'from dopamine.discrete_domains import atari_lib'
-#   Action   : Retained (no change) — atari_lib may be accessed by callers
-#              importing this module, and its presence in the requirements note
-#              for [4] confirms it is intentional.
-#   Impact   : None.
-#
-# ==============================================================================
-"""
+"""Various networks for Jax Dopamine agents."""
 
 import functools
 import time
 import collections
-
-# [CHG-3] atari_lib retained — used transitively; ALE registration is handled
-# at the entry point (eval_run_experiment.py) per requirements note [4].
 from dopamine.discrete_domains import atari_lib
-
 
 SPROutputType = collections.namedtuple(
     'RL_network', ['q_values', 'logits', 'probabilities', "latent"])
-
 from flax import linen as nn
 import gin
 import jax
 from jax import random
-import jax.numpy as jnp   # [CHG-2] duplicate import removed; single import kept
+import jax.numpy as jnp
 import numpy as onp
 
 from typing import (Any, Callable, Optional, Tuple)
 
 from jax import lax
 from jax.nn import initializers
-
-# [CHG-2] second 'import jax.numpy as jnp' removed (was duplicate)
+import jax.numpy as jnp
 
 PRNGKey = Any
 Array = Any
@@ -98,15 +45,11 @@ def _absolute_dims(rank, dims):
     return tuple([rank + dim if dim < 0 else dim for dim in dims])
 
 
-# [CHG-1] Removed merge_param and unused Module from import.
-#         merge_param was deleted in Flax >= 0.7.2 → ImportError without this fix.
-#         compact is kept: used as bare @compact decorator in NoStatsBatchNorm.
-from flax.linen.module import compact
+from flax.linen.module import Module, compact, merge_param
 
 
-# ---------------------------------------------------------------------------
-# Data Augmentation
-# ---------------------------------------------------------------------------
+# --------------------------- < Data Augmentation >------------------------------
+
 
 def _random_crop(key, img, cropped_shape):
     """Random crop an image."""
@@ -117,6 +60,7 @@ def _random_crop(key, img, cropped_shape):
     return img[:, x:x + width, y:y + height]
 
 
+# @functools.partial(jax.jit, static_argnums=(3,))
 @functools.partial(jax.vmap, in_axes=(0, 0, 0, None))
 def _crop_with_indices(img, x, y, cropped_shape):
     cropped_image = (jax.lax.dynamic_slice(img, [x, y, 0], cropped_shape[1:]))
@@ -147,16 +91,18 @@ def drq_image_aug(key, obs, img_pad=4):
     flat_obs = obs.reshape(-1, *obs.shape[-3:])
     paddings = [(0, 0), (img_pad, img_pad), (img_pad, img_pad), (0, 0)]
     cropped_shape = flat_obs.shape
+    # The reference uses ReplicationPad2d in pytorch, but it is not available
+    # in Jax. Use 'edge' instead.
     flat_obs = jnp.pad(flat_obs, paddings, 'edge')
     key1, key2 = random.split(key, num=2)
     cropped_obs = _per_image_random_crop(key2, flat_obs, cropped_shape)
+    # cropped_obs = _random_crop(key2, flat_obs, cropped_shape)
     aug_obs = _intensity_aug(key1, cropped_obs)
     return aug_obs.reshape(*obs.shape)
 
 
-# ---------------------------------------------------------------------------
-# NoisyNetwork
-# ---------------------------------------------------------------------------
+# --------------------------- < NoisyNetwork >---------------------------------
+
 
 @gin.configurable
 class NoisyNetwork(nn.Module):
@@ -181,13 +127,17 @@ class NoisyNetwork(nn.Module):
         :param bias:
         :param kernel_init:
         :param eval_mode:
+        :return:
         """
+
         def mu_init(key, shape):
+            # Initialization of mean noise parameters (Section 3.2)
             low = -1 / jnp.power(x.shape[-1], 0.5)
             high = 1 / jnp.power(x.shape[-1], 0.5)
             return random.uniform(key, minval=low, maxval=high, shape=shape)
 
         def sigma_init(key, shape, dtype=jnp.float32):
+            # Initialization of sigma noise parameters (Section 3.2)
             return jnp.ones(shape, dtype) * (0.5 / onp.sqrt(x.shape[-1]))
 
         # Factored gaussian noise in (10) and (11) in Fortunato et al. (2018).
@@ -201,41 +151,41 @@ class NoisyNetwork(nn.Module):
         # See (8) and (9) in Fortunato et al. (2018) for output computation.
         w_mu = self.param('kernel', mu_init, (x.shape[-1], self.features))
         w_sigma = self.param('kernell', sigma_init, (x.shape[-1], self.features))
-        w_epsilon = jnp.where(
-            eval_mode,
-            onp.zeros(shape=(x.shape[-1], self.features), dtype=onp.float32),
-            w_epsilon)
+        w_epsilon = jnp.where(eval_mode, onp.zeros(shape=(x.shape[-1], self.features), dtype=onp.float32), w_epsilon)
         w = w_mu + jnp.multiply(w_sigma, w_epsilon)
         ret = jnp.matmul(x, w)
 
-        b_epsilon = jnp.where(
-            eval_mode,
-            onp.zeros(shape=(self.features,), dtype=onp.float32),
-            b_epsilon)
+        b_epsilon = jnp.where(eval_mode, onp.zeros(shape=(self.features,), dtype=onp.float32), b_epsilon)
         b_mu = self.param('bias', mu_init, (self.features,))
         b_sigma = self.param('biass', sigma_init, (self.features,))
         b = b_mu + jnp.multiply(b_sigma, b_epsilon)
         return jnp.where(bias, ret + b, ret)
 
 
-# ---------------------------------------------------------------------------
-# RainbowNetwork
-# ---------------------------------------------------------------------------
+# --------------------------- < RainbowNetwork >---------------------------------
+
 
 class NoStatsBatchNorm(nn.Module):
-    """A version of BatchNorm that does not track running statistics.
+    """A version of BatchNorm that does not track running statistics, for use
+       in places where this functionality is not available in Jax.
 
     Attributes:
       axis: the feature or non-batch axis of the input.
       epsilon: a small float added to variance to avoid dividing by zero.
       dtype: the dtype of the computation (default: float32).
-      use_bias: if True, bias (beta) is added.
+      use_bias:  if True, bias (beta) is added.
       use_scale: if True, multiply by scale (gamma).
+        When the next layer is linear (also e.g. nn.relu), this can be disabled
+        since the scaling will be done by the next layer.
       bias_init: initializer for bias, by default, zero.
       scale_init: initializer for scale, by default, one.
       axis_name: the axis name used to combine batch statistics from multiple
-        devices. See `jax.pmap` for a description of axis names.
-      axis_index_groups: groups of axis indices within that named axis.
+        devices. See `jax.pmap` for a description of axis names (default: None).
+      axis_index_groups: groups of axis indices within that named axis
+        representing subsets of devices to reduce over (default: None). For
+        example, `[[0, 1], [2, 3]]` would independently batch-normalize over
+        the examples on the first two and last two devices. See `jax.lax.psum`
+        for more details.
     """
     use_running_average: Optional[bool] = None
     axis: int = -1
@@ -252,6 +202,13 @@ class NoStatsBatchNorm(nn.Module):
     def __call__(self, x, use_running_average: Optional[bool] = None):
         """Normalizes the input using batch statistics.
 
+        NOTE:
+        During initialization (when parameters are mutable) the running average
+        of the batch statistics will not be updated. Therefore, the inputs
+        fed during initialization don't need to match that of the actual input
+        distribution and the reduction axis (set with `axis_name`) does not have
+        to exist.
+
         Args:
           x: the input to be normalized.
           use_running_average: if true, the statistics stored in batch_stats
@@ -263,12 +220,11 @@ class NoStatsBatchNorm(nn.Module):
         x = jnp.asarray(x, jnp.float32)
         axis = self.axis if isinstance(self.axis, tuple) else (self.axis,)
         axis = _absolute_dims(x.ndim, axis)
-        feature_shape = tuple(
-            d if i in axis else 1 for i, d in enumerate(x.shape))
-        reduced_feature_shape = tuple(
-            d for i, d in enumerate(x.shape) if i in axis)
+        feature_shape = tuple(d if i in axis else 1 for i, d in enumerate(x.shape))
+        reduced_feature_shape = tuple(d for i, d in enumerate(x.shape) if i in axis)
         reduction_axis = tuple(i for i in range(x.ndim) if i not in axis)
 
+        # see NOTE above on initialization behavior
         initializing = self.is_mutable_collection('params')
 
         mean = jnp.mean(x, axis=reduction_axis, keepdims=False)
@@ -306,9 +262,7 @@ class FeatureLayer(nn.Module):
         if self.noisy:
             self.net = NoisyNetwork(features=self.features)
         else:
-            self.net = nn.Dense(
-                self.features,
-                kernel_init=nn.initializers.xavier_uniform())
+            self.net = nn.Dense(self.features, kernel_init=nn.initializers.xavier_uniform())
 
     def __call__(self, x, key, eval_mode):
         if self.noisy:
@@ -325,28 +279,29 @@ class LinearHead(nn.Module):
 
     def setup(self):
         if self.dueling:
-            self.advantage = FeatureLayer(
-                self.noisy, self.num_actions * self.num_atoms)
+            self.advantage = FeatureLayer(self.noisy, self.num_actions * self.num_atoms)
             self.value = FeatureLayer(self.noisy, self.num_atoms)
         else:
-            self.advantage = FeatureLayer(
-                self.noisy, self.num_actions * self.num_atoms)
+            self.advantage = FeatureLayer(self.noisy, self.num_actions * self.num_atoms)
 
     def __call__(self, x, key, eval_mode):
         if self.dueling:
+            # _, adv_net = feature_layer(self.noisy, self.num_actions * self.num_atoms)
+            # _, val_net = feature_layer(self.noisy, self.num_atoms)
             adv = self.advantage(x, key, eval_mode)
             value = self.value(x, key, eval_mode)
             adv = adv.reshape((self.num_actions, self.num_atoms))
             value = value.reshape((1, self.num_atoms))
             logits = value + (adv - (jnp.mean(adv, -2, keepdims=True)))
         else:
+            # _, adv_net = feature_layer(self.noisy, self.num_actions * self.num_atoms)
             x = self.advantage(x, key, eval_mode)
             logits = x.reshape((self.num_actions, self.num_atoms))
         return logits
 
 
 def process_inputs(x, data_augmentation=False, rng=None):
-    """Input normalization and, if specified, data augmentation."""
+    """Input normalization and if specified, data augmentation."""
     out = x.astype(jnp.float32) / 255.
     if data_augmentation:
         if rng is None:
@@ -366,13 +321,16 @@ def renormalize(tensor, has_batch=False):
 
 
 class ConvTMCell(nn.Module):
-    """MuZero-style transition model cell for SPR."""
+    """
+    MuZero-style transition model for SPR
+    """
     num_actions: int
     latent_dim: int
     renormalize: bool
 
     def setup(self):
-        self.bn = NoStatsBatchNorm(axis=-1, axis_name="batch")
+        self.bn = NoStatsBatchNorm(axis=-1,
+                                   axis_name="batch")
 
     @nn.compact
     def __call__(self, x, action, eval_mode=False, key=None):
@@ -381,8 +339,7 @@ class ConvTMCell(nn.Module):
         stride_sizes = [1, 1]
 
         action_onehot = jax.nn.one_hot(action, self.num_actions)
-        action_onehot = jax.lax.broadcast(
-            action_onehot, (x.shape[-3], x.shape[-2]))
+        action_onehot = jax.lax.broadcast(action_onehot, (x.shape[-3], x.shape[-2]))
         x = jnp.concatenate([x, action_onehot], -1)
         for layer in range(1):
             x = nn.Conv(
@@ -391,6 +348,7 @@ class ConvTMCell(nn.Module):
                 strides=(stride_sizes[layer], stride_sizes[layer]),
                 kernel_init=nn.initializers.xavier_uniform())(x)
             x = nn.relu(x)
+            # x = self.bn(x, use_running_average=False)
         x = nn.Conv(
             features=sizes[-1],
             kernel_size=(kernel_sizes[-1], kernel_sizes[-1]),
@@ -409,6 +367,7 @@ class RainbowCNN(nn.Module):
 
     @nn.compact
     def __call__(self, x):
+        # x = x[None, Ellipsis]
         hidden_sizes = [32, 64, 64]
         kernel_sizes = [8, 4, 3]
         stride_sizes = [4, 2, 1]
@@ -419,7 +378,7 @@ class RainbowCNN(nn.Module):
                 strides=(stride_sizes[layer], stride_sizes[layer]),
                 kernel_init=nn.initializers.xavier_uniform(),
                 padding=self.padding)(x)
-            x = nn.relu(x)
+            x = nn.relu(x)  # flatten
         return x
 
 
@@ -430,14 +389,12 @@ class TransitionModel(nn.Module):
 
     @nn.compact
     def __call__(self, x, action):
-        scan = nn.scan(
-            ConvTMCell,
-            in_axes=0, out_axes=0,
-            variable_broadcast=['params'],
-            split_rngs={'params': False})(
-                latent_dim=self.latent_dim,
-                num_actions=self.num_actions,
-                renormalize=self.renormalize)
+        scan = nn.scan(ConvTMCell,
+                       in_axes=0, out_axes=0,
+                       variable_broadcast=['params'],
+                       split_rngs={'params': False})(latent_dim=self.latent_dim,
+                                                     num_actions=self.num_actions,
+                                                     renormalize=self.renormalize)
         return scan(x, action)
 
 
@@ -461,18 +418,19 @@ class RainbowDQNNetwork(nn.Module):
     padding: Any = "SAME"
 
     def setup(self):
-        self.transition_model = TransitionModel(
-            num_actions=self.num_actions,
-            latent_dim=64,
-            renormalize=self.renormalize)
+        self.transition_model = TransitionModel(num_actions=self.num_actions,
+                                                latent_dim=64,
+                                                renormalize=self.renormalize)
+        # self.projection, self.apply_projection = FeatureLayer(self.noisy, 512)
         self.projection = FeatureLayer(self.noisy, 512)
         self.predictor = nn.Dense(512)
         self.encoder = RainbowCNN(padding=self.padding)
-        self.head = LinearHead(
-            num_actions=self.num_actions,
-            num_atoms=self.num_atoms,
-            noisy=self.noisy,
-            dueling=self.dueling)
+
+        self.head = LinearHead(num_actions=self.num_actions,
+                               num_atoms=self.num_atoms,
+                               noisy=self.noisy,
+                               dueling=self.dueling,
+                               )
 
     def encode(self, x):
         latent = self.encoder(x)
@@ -489,19 +447,32 @@ class RainbowDQNNetwork(nn.Module):
 
     def spr_rollout(self, latent, actions, key):
         _, pred_latents = self.transition_model(latent, actions)
-        predictions = self.spr_predict(
-            pred_latents.reshape(pred_latents.shape[0], -1), key, True)
+        predictions = self.spr_predict(pred_latents.reshape(pred_latents.shape[0], -1), key, True)
         return predictions
 
     @nn.compact
-    def __call__(self, x, support, actions=None, do_rollout=False,
-                 eval_mode=False, key=None):
+    def __call__(self, x, support, actions=None, do_rollout=False, eval_mode=False, key=None):
+        # Generate a random number generation key if not provided
         if key is None:
             key = random.PRNGKey(int(time.time() * 1e6))
 
         latent = self.encode(x)
+        # Single hidden layer of size 512
         x = self.projection(latent.reshape(-1), key, eval_mode)
         x = nn.relu(x)
+
+        # if self.dueling:
+        #     # _, adv_net = feature_layer(self.noisy, self.num_actions * self.num_atoms)
+        #     # _, val_net = feature_layer(self.noisy, self.num_atoms)
+        #     adv = self.advantage(x, key, eval_mode)
+        #     value = self.value(x, key, eval_mode)
+        #     adv = adv.reshape((self.num_actions, self.num_atoms))
+        #     value = value.reshape((1, self.num_atoms))
+        #     logits = value + (adv - (jnp.mean(adv, -2, keepdims=True)))
+        # else:
+        #     # _, adv_net = feature_layer(self.noisy, self.num_actions * self.num_atoms)
+        #     x = self.advantage(x, key, eval_mode)
+        #     logits = x.reshape((self.num_actions, self.num_atoms))
 
         logits = self.head(x, key, eval_mode)
 

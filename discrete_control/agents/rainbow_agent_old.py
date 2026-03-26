@@ -12,8 +12,8 @@
  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  See the License for the specific language governing permissions and
  limitations under the License.
-"""
 
+"""
 
 """Compact implementation of the full Rainbow agent in Jax.
 
@@ -28,75 +28,6 @@ Specifically, we implement the following components from Rainbow:
 
 Details in "Rainbow: Combining Improvements in Deep Reinforcement Learning" by
 Hessel et al. (2018).
-
-# ==============================================================================
-# Migration changelog (rainbow_agent_old.py -> rainbow_agent.py)
-# Target: Python 3.12 | JAX >= 0.9.1 | Flax >= 0.12.1 | Optax >= 0.2.6
-# ==============================================================================
-#
-# [CHG-1] jax.tree_leaves()  ->  jax.tree.leaves()
-#   Location : tree_norm()
-#   Reason   : jax.tree_leaves removed in JAX >= 0.4.25; moved to jax.tree namespace.
-#   Impact   : Prevents AttributeError at runtime; no behavioral change.
-#
-# [CHG-2] Removed import: from flax.core.frozen_dict import FrozenDict
-#   Location : module-level imports
-#   Reason   : FrozenDict is soft-deprecated in Flax >= 0.7.2.
-#   Impact   : Eliminates DeprecationWarning; plain dicts used throughout.
-#
-# [CHG-3] copy_within_frozen_tree() — FrozenDict.copy(add_or_replace=...) removed
-#   Location : copy_within_frozen_tree()
-#   Old      : old[prefix].copy(add_or_replace=new)
-#   New      : {**old[prefix], **new}
-#   Reason   : FrozenDict-specific method unavailable on plain dicts.
-#   Impact   : Identical shallow-merge semantics via standard dict unpacking.
-#
-# [CHG-4] copy_params() — removed FrozenDict from isinstance check
-#   Location : copy_params()
-#   Old      : isinstance(old, dict) or isinstance(old, OrderedDict) or isinstance(old, FrozenDict)
-#   New      : isinstance(old, (dict, OrderedDict))
-#   Reason   : FrozenDict no longer in use; check remains exhaustive for plain dicts.
-#   Impact   : No behavioral change.
-#
-# [CHG-5] _build_networks_and_optimizer() — mask dicts no longer wrapped in FrozenDict
-#   Location : JaxSPRAgent._build_networks_and_optimizer()
-#   Old      : self.encoder_mask = FrozenDict({...}); self.head_mask = FrozenDict({...})
-#   New      : plain dict literals
-#   Reason   : optax.masked() accepts any pytree-compatible mapping; FrozenDict unnecessary.
-#   Impact   : No change in optimizer masking behavior.
-#
-# [CHG-6] reset_weights() — removed FrozenDict wrap on optim_to_copy
-#   Location : JaxSPRAgent.reset_weights()
-#   Old      : optim_to_copy = FrozenDict(optim_to_copy)
-#   New      : plain dict, no wrapping before _replace(**optim_to_copy)
-#   Reason   : FrozenDict removed; ** unpacking works identically on plain dicts.
-#   Impact   : No behavioral change in optimizer state reconstruction.
-#
-# [CHG-7] reset_weights() — removed FrozenDict wrap on self.online_params
-#   Location : JaxSPRAgent.reset_weights()
-#   Old      : self.online_params = FrozenDict(copy_params(...))
-#   New      : self.online_params = copy_params(...)
-#   Reason   : copy_params() returns a plain dict; JAX treats plain dicts as pytrees.
-#   Impact   : No behavioral change; JAX/Flax parameter handling identical.
-#
-# [CHG-8] _training_step_update() — TF1 summary API replaced with TF2
-#   Location : JaxSPRAgent._training_step_update()
-#   Old      : summary = tf.compat.v1.Summary(value=[
-#                  tf.compat.v1.Summary.Value(tag=..., simple_value=...),
-#                  ...
-#              ])
-#              self.summary_writer.add_summary(summary, self.training_steps)
-#   New      : with self.summary_writer.as_default():
-#                  tf.summary.scalar(tag, value, step=self.training_steps)
-#                  ...
-#   Reason   : tf.compat.v1.Summary and SummaryWriter.add_summary() are removed
-#              in TF >= 2.x eager-only mode (first available for Python 3.12 as
-#              TF 2.21.0). The _ResourceSummaryWriter returned by TF2 has no
-#              add_summary() method, raising AttributeError at every log step.
-#   Impact   : All 10 training metrics written correctly to TensorBoard;
-#              no v1 graph-mode overhead.
-#
-# ==============================================================================
 """
 
 import collections
@@ -108,37 +39,25 @@ from absl import logging
 from dopamine.jax import losses
 from dopamine.jax.agents.dqn import dqn_agent
 from dopamine.jax.agents.rainbow import rainbow_agent as dopamine_rainbow_agent
-from dopamine.tf.replay_memory import prioritized_replay_buffer
+from dopamine.replay_memory import prioritized_replay_buffer
 import gin
 import jax
 import jax.numpy as jnp
 import optax
-import flax  # noqa: F401  (kept for downstream compatibility)
+import flax
 import numpy as onp
 import tensorflow as tf
 from discrete_control import networks
 from discrete_control.replay_memory import batched_buffer as tdrbs
 from collections import OrderedDict
-
-
-# [CHG-2] FrozenDict import removed — soft-deprecated in Flax >= 0.7.2.
-# Plain dicts are the recommended replacement and are used throughout this file.
-
-
-# ---------------------------------------------------------------------------
-# Utility helpers
-# ---------------------------------------------------------------------------
-
+from flax.core.frozen_dict import FrozenDict
 
 def copy_within_frozen_tree(old, new, prefix):
-    # [CHG-3] Replaced FrozenDict.copy(add_or_replace=...) with dict unpacking.
-    new_entry = {**old[prefix], **new}
-    return {**old, prefix: new_entry}
-
+    new_entry = old[prefix].copy(add_or_replace=new)
+    return old.copy(add_or_replace={prefix: new_entry})
 
 def copy_params(old, new, keys=("encoder", "transition_model")):
-    # [CHG-4] Removed FrozenDict from isinstance check; plain dicts cover all cases.
-    if isinstance(old, (dict, OrderedDict)):
+    if isinstance(old, dict) or isinstance(old, OrderedDict) or isinstance(old, FrozenDict):
         fresh_dict = {}
         for k, v in old.items():
             if k in keys:
@@ -149,22 +68,13 @@ def copy_params(old, new, keys=("encoder", "transition_model")):
     else:
         return new
 
-
 @gin.configurable
 def identity_epsilon(unused_decay_period, unused_step, unused_warmup_steps,
                      epsilon):
-    return epsilon
-
+  return epsilon
 
 def tree_norm(tree):
-    # [CHG-1] jax.tree_leaves() -> jax.tree.leaves() (JAX >= 0.4.25).
-    return jnp.sqrt(sum((x**2).sum() for x in jax.tree.leaves(tree)))
-
-
-# ---------------------------------------------------------------------------
-# JIT-compiled action selection
-# ---------------------------------------------------------------------------
-
+    return jnp.sqrt(sum((x**2).sum() for x in jax.tree_leaves(tree)))
 
 @functools.partial(jax.jit, static_argnums=(0, 4, 5, 6, 7, 8, 10, 11))
 def select_action(network_def, params, state, rng, num_actions, eval_mode,
@@ -184,25 +94,19 @@ def select_action(network_def, params, state, rng, num_actions, eval_mode,
     rng, rng1, rng2, rng3 = jax.random.split(rng, num=4)
     p = jax.random.uniform(rng1, shape=(state.shape[0],))
     q_values = get_q_values_no_actions(q_online, state, rng2)
+    # q_values = network_def.apply(params, state, key=rng2, eval_mode=eval_mode,
+    #                              support=support).q_values
 
     best_actions = jnp.argmax(q_values, axis=-1)
-    new_actions = jnp.where(
-        p <= epsilon,
-        jax.random.randint(rng3, (state.shape[0],), 0, num_actions),
+    new_actions = jnp.where(p <= epsilon,
+        jax.random.randint(rng3, (state.shape[0],), 0, num_actions,),
         best_actions)
     return rng, new_actions
-
-
-# ---------------------------------------------------------------------------
-# vmapped forward passes
-# ---------------------------------------------------------------------------
-
 
 @functools.partial(jax.vmap, in_axes=(None, 0, None), axis_name="batch")
 def get_q_values_no_actions(model, states, rng):
     results = model(states, actions=None, do_rollout=False, key=rng)[0]
     return results.q_values
-
 
 @functools.partial(jax.vmap, in_axes=(None, 0, 0, None, None), axis_name="batch")
 def get_logits(model, states, actions, do_rollout, rng):
@@ -222,177 +126,188 @@ def get_spr_targets(model, states, key):
     return results
 
 
-# ---------------------------------------------------------------------------
-# JIT-compiled training step
-# ---------------------------------------------------------------------------
-
-
 @functools.partial(jax.jit, static_argnums=(0, 3, 13, 14, 15, 17))
-def train(network_def, online_params, target_params, optimizer, optimizer_state,
-          states, actions, next_states, rewards, terminals, same_traj_mask,
-          loss_weights, support, cumulative_gamma, double_dqn, distributional,
-          rng, spr_weight):
-    """Run a training step."""
+def train(network_def, online_params, target_params, optimizer, optimizer_state, states, actions, next_states,
+          rewards, terminals, same_traj_mask, loss_weights, support,
+          cumulative_gamma, double_dqn, distributional, rng, spr_weight):
+  """Run a training step."""
 
-    current_state = states[:, 0]
-    rng, rng1, rng2 = jax.random.split(rng, num=3)
-    use_spr = spr_weight > 0
+  current_state = states[:, 0]
+  online_params = online_params
+  # Split the current rng into 2 for updating the rng after this call
+  rng, rng1, rng2 = jax.random.split(rng, num=3)
+  use_spr = spr_weight > 0
+
+  def q_online(state, key, actions=None, do_rollout=False):
+    return network_def.apply(
+        online_params,
+        state,
+        actions=actions,
+        do_rollout=do_rollout,
+        key=key,
+        support=support,
+        mutable=["batch_stats"])
+
+  def q_target(state, key):
+    return network_def.apply(
+        target_params, state, key=key, support=support, mutable=["batch_stats"])
+
+  def encode_project(state, key):
+    latent, _ = network_def.apply(
+        target_params,
+        state,
+        method=network_def.encode,
+        mutable=["batch_stats"])
+    latent = latent.reshape(-1)
+    return network_def.apply(
+        target_params,
+        latent,
+        key=key,
+        eval_mode=True,
+        method=network_def.project)
+
+  def loss_fn(params, target, spr_targets, loss_multipliers):
+    """Computes the distributional loss for C51 or huber loss for DQN."""
 
     def q_online(state, key, actions=None, do_rollout=False):
-        return network_def.apply(
-            online_params, state, actions=actions, do_rollout=do_rollout,
-            key=key, support=support, mutable=["batch_stats"])
+      return network_def.apply(
+          params,
+          state,
+          actions=actions,
+          do_rollout=do_rollout,
+          key=key,
+          support=support,
+          mutable=["batch_stats"])
 
-    def q_target(state, key):
-        return network_def.apply(
-            target_params, state, key=key, support=support,
-            mutable=["batch_stats"])
-
-    def encode_project(state, key):
-        latent, _ = network_def.apply(
-            target_params, state,
-            method=network_def.encode,
-            mutable=["batch_stats"])
-        latent = latent.reshape(-1)
-        return network_def.apply(
-            target_params, latent, key=key, eval_mode=True,
-            method=network_def.project)
-
-    def loss_fn(params, target, spr_targets, loss_multipliers):
-        """Computes the distributional loss for C51 or huber loss for DQN."""
-
-        def q_online(state, key, actions=None, do_rollout=False):
-            return network_def.apply(
-                params, state, actions=actions, do_rollout=do_rollout,
-                key=key, support=support, mutable=["batch_stats"])
-
-        if distributional:
-            (logits, spr_predictions) = get_logits(
-                q_online, current_state, actions[:, :-1], use_spr, rng)
-            logits = jnp.squeeze(logits)
-            chosen_action_logits = jax.vmap(lambda x, y: x[y])(logits, actions[:, 0])
-            dqn_loss = jax.vmap(losses.softmax_cross_entropy_loss_with_logits)(
-                target, chosen_action_logits)
-            td_error = dqn_loss + jnp.nan_to_num(target * jnp.log(target)).sum(-1)
-        else:
-            q_values, spr_predictions = get_q_values(
-                q_online, current_state, actions[:, :-1], use_spr, rng)
-            q_values = jnp.squeeze(q_values)
-            replay_chosen_q = jax.vmap(lambda x, y: x[y])(q_values, actions[:, 0])
-            dqn_loss = jax.vmap(losses.huber_loss)(target, replay_chosen_q)
-            td_error = dqn_loss
-
-        if use_spr:
-            spr_predictions = spr_predictions.transpose(1, 0, 2)
-            spr_predictions = spr_predictions / jnp.linalg.norm(
-                spr_predictions, 2, -1, keepdims=True)
-            spr_targets = spr_targets / jnp.linalg.norm(
-                spr_targets, 2, -1, keepdims=True)
-            spr_loss = jnp.power(spr_predictions - spr_targets, 2).sum(-1)
-            spr_loss = (spr_loss * same_traj_mask.transpose(1, 0)).mean(0)
-        else:
-            spr_loss = 0
-
-        loss = dqn_loss + spr_weight * spr_loss
-        mean_loss = jnp.mean(loss_multipliers * loss)
-        return mean_loss, (loss, dqn_loss, spr_loss, td_error)
-
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    target = target_output(q_online, q_target, next_states, rewards, terminals,
-                           support, cumulative_gamma, double_dqn, distributional,
-                           rng1)
+    if distributional:
+      (logits, spr_predictions) = get_logits(q_online, current_state,
+                                             actions[:, :-1], use_spr, rng)
+      logits = jnp.squeeze(logits)
+      # Fetch the logits for its selected action. We use vmap to perform this
+      # indexing across the batch.
+      chosen_action_logits = jax.vmap(lambda x, y: x[y])(logits, actions[:, 0])
+      dqn_loss = jax.vmap(losses.softmax_cross_entropy_loss_with_logits)(
+          target, chosen_action_logits)
+      td_error = dqn_loss + jnp.nan_to_num(target*jnp.log(target)).sum(-1)
+    else:
+      q_values, spr_predictions = get_q_values(q_online, current_state,
+                                               actions[:, :-1], use_spr, rng)
+      q_values = jnp.squeeze(q_values)
+      replay_chosen_q = jax.vmap(lambda x, y: x[y])(q_values, actions[:, 0])
+      dqn_loss = jax.vmap(losses.huber_loss)(target, replay_chosen_q)
+      td_error = dqn_loss
 
     if use_spr:
-        future_states = states[:, 1:]
-        spr_targets = get_spr_targets(
-            encode_project,
-            future_states.reshape(-1, *future_states.shape[2:]),
-            rng1)
-        spr_targets = spr_targets.reshape(
-            *future_states.shape[:2], *spr_targets.shape[1:]).transpose(1, 0, 2)
+      spr_predictions = spr_predictions.transpose(1, 0, 2)
+      spr_predictions = spr_predictions / jnp.linalg.norm(
+          spr_predictions, 2, -1, keepdims=True)
+      spr_targets = spr_targets / jnp.linalg.norm(
+          spr_targets, 2, -1, keepdims=True)
+      spr_loss = jnp.power(spr_predictions - spr_targets, 2).sum(-1)
+      spr_loss = (spr_loss * same_traj_mask.transpose(1, 0)).mean(0)
     else:
-        spr_targets = None
+      spr_loss = 0
 
-    (mean_loss, (loss, dqn_loss, spr_loss, td_error)), grad = \
-        grad_fn(online_params, target, spr_targets, loss_weights)
-    grad_norm = tree_norm(grad)
-    updates, optimizer_state = optimizer.update(grad, optimizer_state)
-    online_params = optax.apply_updates(online_params, updates)
-    return (optimizer_state, online_params, loss, mean_loss, dqn_loss,
-            spr_loss, grad_norm, td_error, rng2)
+    loss = dqn_loss + spr_weight * spr_loss
 
+    mean_loss = jnp.mean(loss_multipliers * loss)
+    return mean_loss, (loss, dqn_loss, spr_loss, td_error)
 
-# ---------------------------------------------------------------------------
-# vmapped target computation
-# ---------------------------------------------------------------------------
+  # Use the weighted mean loss for gradient computation.
+  grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+  target = target_output(q_online, q_target, next_states, rewards, terminals,
+                         support, cumulative_gamma, double_dqn, distributional,
+                         rng1)
+
+  if use_spr:
+    future_states = states[:, 1:]
+    spr_targets = get_spr_targets(
+        encode_project, future_states.reshape(-1, *future_states.shape[2:]),
+        rng1)
+    spr_targets = spr_targets.reshape(*future_states.shape[:2],
+                                      *spr_targets.shape[1:]).transpose(
+                                          1, 0, 2)
+  else:
+    spr_targets = None
+
+  # Get the unweighted loss without taking its mean for updating priorities.
+  (mean_loss, (loss, dqn_loss, spr_loss, td_error)), grad =\
+      grad_fn(online_params, target, spr_targets, loss_weights)
+  grad_norm = tree_norm(grad)
+  updates, optimizer_state = optimizer.update(grad, optimizer_state)
+  online_params = optax.apply_updates(online_params, updates)
+  return optimizer_state, online_params, loss, mean_loss, dqn_loss, spr_loss, \
+         grad_norm, td_error, rng2
 
 
 @functools.partial(
-    jax.vmap,
-    in_axes=(None, None, 0, 0, 0, None, None, None, None, None),
-    axis_name="batch")
+    jax.vmap, in_axes=(None, None, 0, 0, 0, None, None, None, None, None), axis_name="batch")
 def target_output(model, target_network, next_states, rewards, terminals,
                   support, cumulative_gamma, double_dqn, distributional, rng):
     """Builds the C51 target distribution or DQN target Q-values."""
     is_terminal_multiplier = 1. - terminals.astype(jnp.float32)
+    # Incorporate terminal state to discount factor.
     gamma_with_terminal = cumulative_gamma * is_terminal_multiplier
 
     target_network_dist, _ = target_network(next_states, key=rng)
     if double_dqn:
+        # Use the current network for the action selection
         next_state_target_outputs, _ = model(next_states, key=rng)
     else:
         next_state_target_outputs = target_network_dist
-
+    # Action selection using Q-values for next-state
     q_values = jnp.squeeze(next_state_target_outputs.q_values)
     next_qt_argmax = jnp.argmax(q_values)
 
     if distributional:
+        # Compute the target Q-value distribution
         probabilities = jnp.squeeze(target_network_dist.probabilities)
         next_probabilities = probabilities[next_qt_argmax]
         target_support = rewards + gamma_with_terminal * support
-        target = dopamine_rainbow_agent.project_distribution(
-            target_support, next_probabilities, support)
+        target = dopamine_rainbow_agent.project_distribution(target_support, next_probabilities, support)
     else:
+        # Compute the target Q-value
         next_q_values = jnp.squeeze(target_network_dist.q_values)
         replay_next_qt_max = next_q_values[next_qt_argmax]
         target = rewards + gamma_with_terminal * replay_next_qt_max
 
     return jax.lax.stop_gradient(target)
 
-
-# ---------------------------------------------------------------------------
-# Optimizer factory
-# ---------------------------------------------------------------------------
-
-
 @gin.configurable
 def create_optimizer(name='adam', learning_rate=6.25e-5, beta1=0.9, beta2=0.999,
                      eps=1.5e-4, centered=False, warmup=0):
-    """Create an optimizer for training."""
-    if name == 'adam':
-        logging.info('Creating Adam optimizer with settings lr=%f, beta1=%f, '
-                     'beta2=%f, eps=%f', learning_rate, beta1, beta2, eps)
-        if warmup == 0:
-            return optax.adam(learning_rate, b1=beta1, b2=beta2, eps=eps)
-        return optax.inject_hyperparams(optax.adam)(
-            learning_rate=optax.linear_schedule(0, learning_rate, warmup),
-            b1=beta1, b2=beta2, eps=eps)
-    elif name == 'rmsprop':
-        logging.info('Creating RMSProp optimizer with settings lr=%f, beta2=%f, '
-                     'eps=%f', learning_rate, beta2, eps)
-        if warmup == 0:
-            return optax.rmsprop(learning_rate, decay=beta2, eps=eps,
-                                 centered=centered)
-        return optax.inject_hyperparams(optax.rmsprop)(
-            learning_rate=optax.linear_schedule(0, learning_rate, warmup),
-            decay=beta2, eps=eps, centered=centered)
-    else:
-        raise ValueError('Unsupported optimizer {}'.format(name))
+  """Create an optimizer for training.
 
+  Currently, only the Adam and RMSProp optimizers are supported.
 
-# ---------------------------------------------------------------------------
-# Agent
-# ---------------------------------------------------------------------------
+  Args:
+    name: str, name of the optimizer to create.
+    learning_rate: float, learning rate to use in the optimizer.
+    beta1: float, beta1 parameter for the optimizer.
+    beta2: float, beta2 parameter for the optimizer.
+    eps: float, epsilon parameter for the optimizer.
+    centered: bool, centered parameter for RMSProp.
+    warmup: int, warmup steps for learning rate.
+
+  Returns:
+    A flax optimizer.
+  """
+  if name == 'adam':
+    logging.info('Creating Adam optimizer with settings lr=%f, beta1=%f, '
+                 'beta2=%f, eps=%f', learning_rate, beta1, beta2, eps)
+    if warmup == 0:
+        return optax.adam(learning_rate, b1=beta1, b2=beta2, eps=eps)
+    return optax.inject_hyperparams(optax.adam)(learning_rate=optax.linear_schedule(0, learning_rate, warmup), b1=beta1, b2=beta2, eps=eps)
+  elif name == 'rmsprop':
+    logging.info('Creating RMSProp optimizer with settings lr=%f, beta2=%f, '
+                 'eps=%f', learning_rate, beta2, eps)
+    if warmup == 0:
+        return optax.rmsprop(learning_rate, decay=beta2, eps=eps,
+                         centered=centered)
+    return optax.inject_hyperparams(optax.rmsprop)(learning_rate=optax.linear_schedule(0, learning_rate, warmup), decay=beta2, eps=eps,
+                         centered=centered)
+  else:
+    raise ValueError('Unsupported optimizer {}'.format(name))
 
 
 @gin.configurable
@@ -430,6 +345,47 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
                  updates_on_reset=0,
                  summary_writer=None,
                  seed=None):
+        """Initializes the agent and constructs the necessary components.
+
+        Args:
+            num_actions: int, number of actions the agent can take at any state.
+            noisy: bool, Whether to use noisy networks or not.
+            dueling: bool, Whether to use dueling network architecture or not.
+            double_dqn: bool, Whether to use Double DQN or not.
+            distributional: bool, whether to use distributional RL or not.
+            data_augmentation: bool, Whether to use data augmentation or not.
+            network: flax.linen Module, neural network used by the agent initialized
+                by shape in _create_network below. See
+                dopamine.jax.networks.RainbowNetwork as an example.
+            num_atoms: int, the number of buckets of the value function distribution.
+            vmax: float, the value distribution support is [vmin, vmax].
+            vmin: float, the value distribution support is [vmin, vmax]. If vmin is
+                None, it is set to -vmax.
+            jumps: int, how many steps to use for SPR. 5 is original.
+            spr_weight: float, what weight to give SPR loss. 5 is original.
+            batch_size: int, batch size for training.
+            log_every: int, how often to log
+            epsilon_fn: function expecting 4 parameters: (decay_period, step,
+                warmup_steps, epsilon). This function should return the epsilon value
+                used for exploration during training.
+            replay_scheme: str, 'prioritized' or 'uniform', the sampling scheme of the
+                replay memory.
+            replay_type: str, 'deterministic' or 'regular', specifies the type of
+                replay buffer to create.
+            reset_every: int, how often to reset.
+            reset_offset: int, offsets reset period.
+            total_resets: int, how many resets to perform during training.
+            encoder_warmup: int, LR warmup steps for encoder after resets.
+            head_warmup: int, LR warmup steps for head after resets.
+            reset_head: bool, whether or not to reset final layer
+            reset_projection: bool, reset penultimate layer
+            reset_encoder: bool, reset CNN encoder
+            reset_noise: bool, reset noisy nets parameters in head.
+            updates_on_reset: int, how many offline updates to perform after
+                each reset.
+            summary_writer: SummaryWriter object, for outputting training statistics.
+            seed: int, a seed for Jax RNG and initialization.
+        """
         logging.info('Creating %s agent with the following parameters:',
                      self.__class__.__name__)
         logging.info('\t double_dqn: %s', double_dqn)
@@ -444,7 +400,7 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
         logging.info('\t reset_noise: %s', reset_noise)
         logging.info('\t reset_projection: %s', reset_projection)
         logging.info('\t updates_on_reset: %s', updates_on_reset)
-
+        # We need this because some tools convert round floats into ints.
         vmax = float(vmax)
         self._num_atoms = num_atoms
         vmin = vmin if vmin else -vmax
@@ -461,6 +417,7 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
         self._jumps = jumps
         self.spr_weight = spr_weight
         self.log_every = log_every
+
         self.reset_every = int(reset_every)
         self.reset_offset = int(reset_offset)
         self.reset_head = reset_head
@@ -469,15 +426,16 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
         self.reset_noise = reset_noise
         self.updates_on_reset = int(updates_on_reset)
         self.remaining_resets = int(total_resets)
+
         self.encoder_warmup = int(encoder_warmup)
         self.head_warmup = int(head_warmup)
+
         self.replay_elements = None
 
         super().__init__(
             num_actions=num_actions,
             network=functools.partial(
-                network,
-                num_atoms=num_atoms,
+                network, num_atoms=num_atoms,
                 noisy=self._noisy,
                 dueling=self._dueling,
                 distributional=self._distributional),
@@ -488,29 +446,27 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
     def _build_networks_and_optimizer(self):
         self._rng, rng = jax.random.split(self._rng)
         self.state_shape = self.state.shape
-        self.online_params = self.network_def.init(
-            rng, x=self.state,
-            actions=jnp.zeros((5,)),
-            do_rollout=self.spr_weight > 0,
-            support=self._support)
+        self.online_params = self.network_def.init(rng, x=self.state,
+                                                   actions=jnp.zeros((5,)),
+                                                   do_rollout=self.spr_weight>0,
+                                                   support=self._support)
         optimizer = create_optimizer(self._optimizer_name, warmup=self.head_warmup)
-        encoder_optimizer = create_optimizer(self._optimizer_name,
-                                             warmup=self.encoder_warmup)
+        encoder_optimizer = create_optimizer(self._optimizer_name, warmup=self.encoder_warmup)
 
-        # [CHG-5] Plain dict literals replace FrozenDict({...}).
-        self.encoder_mask = {
-            "params": {"encoder": True, "transition_model": True,
-                       "head": False, "projection": False, "predictor": False}
-        }
-        self.head_mask = {
-            "params": {"encoder": False, "transition_model": False,
-                       "head": True, "projection": True, "predictor": True}
-        }
+        self.encoder_mask = FrozenDict(
+            {"params": {"encoder": True, "transition_model": True,
+                        "head": False, "projection": False, "predictor": False}}
+        )
+        self.head_mask = FrozenDict(
+            {"params": {"encoder": False, "transition_model": False,
+                        "head": True, "projection": True, "predictor": True}}
+        )
 
         self.optimizer = optax.chain(
             optax.masked(encoder_optimizer, self.encoder_mask),
             optax.masked(optimizer, self.head_mask),
         )
+
         self.optimizer_state = self.optimizer.init(self.online_params)
         self.target_network_params = copy.deepcopy(self.online_params)
 
@@ -520,7 +476,6 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
             raise ValueError('Invalid replay scheme: {}'.format(self._replay_scheme))
         if self._replay_type not in ['deterministic']:
             raise ValueError('Invalid replay type: {}'.format(self._replay_type))
-
         if self._replay_scheme == "prioritized":
             buffer = tdrbs.PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
                 observation_shape=self.observation_shape,
@@ -528,7 +483,7 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
                 update_horizon=self.update_horizon,
                 gamma=self.gamma,
                 subseq_len=self._jumps + 1,
-                observation_dtype=self.observation_dtype)
+                observation_dtype=self.observation_dtype,)
         else:
             buffer = tdrbs.JaxSubsequenceParallelEnvReplayBuffer(
                 observation_shape=self.observation_shape,
@@ -536,24 +491,24 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
                 update_horizon=self.update_horizon,
                 gamma=self.gamma,
                 subseq_len=self._jumps + 1,
-                observation_dtype=self.observation_dtype)
+                observation_dtype=self.observation_dtype,)
 
         self._batch_size = buffer._batch_size
         self.n_envs = buffer.n_envs
         self.start = time.time()
 
-        print("Operating with {} environments, batch size {} and replay ratio {}".format(
-            self.n_envs, self._batch_size, self._replay_ratio))
-        self._num_updates_per_train_step = (
-            self._replay_ratio * self.n_envs // self._batch_size)
-        print("Calculated {} updates per step".format(
-            self._num_updates_per_train_step))
-        print("Setting min_replay_history to {} from {}".format(
-            self.min_replay_history / self.n_envs, self.min_replay_history))
-        print("Setting epsilon_decay_period to {} from {}".format(
-            self.epsilon_decay_period / self.n_envs, self.epsilon_decay_period))
-        self.min_replay_history = (self.min_replay_history / self.n_envs)
-        self.epsilon_decay_period = (self.epsilon_decay_period / self.n_envs)
+        print("Operating with {} environments, batch size {} and replay ratio {}".format(self.n_envs, self._batch_size,
+                                                                                         self._replay_ratio))
+        self._num_updates_per_train_step = self._replay_ratio*self.n_envs // self._batch_size
+        print("Calculated {} updates per step".format(self._num_updates_per_train_step))
+
+        print("Setting min_replay_history to {} from {}".format(self.min_replay_history/self.n_envs,
+                                                                self.min_replay_history))
+        print("Setting epsilon_decay_period to {} from {}".format(self.epsilon_decay_period/self.n_envs,
+                                                                  self.epsilon_decay_period))
+        self.min_replay_history = (self.min_replay_history/self.n_envs)
+        self.epsilon_decay_period = (self.epsilon_decay_period/self.n_envs)
+
         return buffer
 
     def _sample_from_replay_buffer(self):
@@ -568,20 +523,19 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
         if self.remaining_resets <= 0:
             print("All resets completed, skipping")
             return
-        self.remaining_resets -= 1
-        print("Resetting weights; {} resets remaining".format(self.remaining_resets))
+        else:
+            self.remaining_resets -= 1
+            print("Resetting weights; {} resets remaining".format(self.remaining_resets))
 
         self._rng, rng = jax.random.split(self._rng)
         if len(self.state_shape) < len(self.state.shape):
             state = self.state[0].reshape(*self.state_shape)
         else:
             state = self.state.reshape(*self.state_shape)
-
-        online_network_params = self.network_def.init(
-            rng, x=state,
-            actions=jnp.zeros((5,)),
-            do_rollout=self.spr_weight > 0,
-            support=self._support)
+        online_network_params = self.network_def.init(rng, x=state,
+                                                      actions=jnp.zeros((5,)),
+                                                      do_rollout=self.spr_weight > 0,
+                                                      support=self._support)
         optim_state = self.optimizer.init(self.online_params)
 
         keys_to_copy = []
@@ -594,20 +548,19 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
 
         updated_optim_state = []
         for i in range(len(optim_state)):
-            optim_to_copy = copy_params(
-                dict(self.optimizer_state[i]._asdict()),
-                dict(optim_state[i]._asdict()),
-                keys=keys_to_copy)
-            # [CHG-6] No FrozenDict wrapping; plain dict unpacks with ** directly.
+            optim_to_copy = copy_params(dict(self.optimizer_state[i]._asdict()),
+                                        dict(optim_state[i]._asdict()),
+                                        keys=keys_to_copy)
+            optim_to_copy = FrozenDict(optim_to_copy)
             updated_optim_state.append(optim_state[i]._replace(**optim_to_copy))
 
         self.optimizer_state = tuple(updated_optim_state)
-        # [CHG-7] copy_params() returns a plain dict; no FrozenDict wrapping needed.
-        self.online_params = copy_params(self.online_params,
-                                         online_network_params,
-                                         keys=keys_to_copy)
+        self.online_params = FrozenDict(copy_params(self.online_params,
+                                                    online_network_params,
+                                                    keys=keys_to_copy))
 
         print("Running {} steps after reset".format(self.updates_on_reset))
+
         for i in range(self.updates_on_reset):
             self._train_step()
 
@@ -624,24 +577,32 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
 
     def _training_step_update(self, step_index=0):
         """Gradient update during every training step."""
+        # print("Inter-batch time {}".format(time.time() - self.start))
         interbatch_time = time.time() - self.start
         self.start = time.time()
         train_start = time.time()
-
         if self.replay_elements is None:
             self._sample_from_replay_buffer()
             self.preprocess_states()
-
+        # print("Sampling took {}".format(time.time() - train_start))
         sampling_time = time.time() - train_start
         train_start = time.time()
+
         aug_time = time.time() - train_start
         train_start = time.time()
 
         if self._replay_scheme == 'prioritized':
+            # The original prioritized experience replay uses a linear exponent
+            # schedule 0.4 -> 1.0. Comparing the schedule to a fixed exponent of
+            # 0.5 on 5 games (Asterix, Pong, Q*Bert, Seaquest, Space Invaders)
+            # suggested a fixed exponent actually performs better, except on Pong.
             probs = self.replay_elements['sampling_probabilities']
+            probs = probs
+            # Weight the loss by the inverse priorities.
             loss_weights = 1.0 / jnp.sqrt(probs + 1e-10)
             loss_weights /= jnp.max(loss_weights)
         else:
+            # Uniform weights if not using prioritized replay.
             loss_weights = jnp.ones(self.replay_elements['state'].shape[0])
 
         self.optimizer_state, self.online_params, loss, mean_loss, \
@@ -656,45 +617,51 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
             self.replay_elements['terminal'][:, 0],
             self.replay_elements['same_trajectory'][:, 1:], loss_weights,
             self._support, self.cumulative_gamma, self._double_dqn,
-            self._distributional, self._rng, self.spr_weight)
-
-        # Sample next batch while JAX processes the current training step.
+            self._distributional, self._rng, self.spr_weight
+        )
+        # Jax will happily run train asynchronously unless we block on its
+        # output, so we can sample a new batch while it's running.
         self._sample_from_replay_buffer()
         self.preprocess_states()
 
         if self._replay_scheme == 'prioritized':
+            # Rainbow and prioritized replay are parametrized by an exponent
+            # alpha, but in both cases it is set to 0.5 - for simplicity's sake we
+            # leave it as is here, using the more direct sqrt(). Taking the square
+            # root "makes sense", as we are dealing with a squared loss.  Add a
+            # small nonzero value to the loss to avoid 0 priority items. While
+            # technically this may be okay, setting all items to 0 priority will
+            # cause troubles, and also result in 1.0 / 0.0 = NaN correction terms.
             self._replay.set_priority(self.replay_elements['indices'],
                                       jnp.sqrt(dqn_loss + 1e-10))
-
+        #
+        # print("Training took {}".format(time.time() - train_start))
         training_time = time.time() - train_start
         if self.training_steps % self.log_every == 0 and step_index == 0:
             if self.summary_writer is not None:
-                # [CHG-8] TF2 tf.summary.scalar replaces removed tf.compat.v1.Summary
-                # and SummaryWriter.add_summary(). The TF2 _ResourceSummaryWriter
-                # object has no add_summary() method; all writes must go through
-                # writer.as_default() context + tf.summary.scalar().
-                with self.summary_writer.as_default():
-                    tf.summary.scalar('TotalLoss', float(mean_loss),
-                                      step=self.training_steps)
-                    tf.summary.scalar('DQNLoss', float(dqn_loss.mean()),
-                                      step=self.training_steps)
-                    tf.summary.scalar('GradNorm', float(grad_norm),
-                                      step=self.training_steps)
-                    tf.summary.scalar('PNorm',
-                                      float(tree_norm(self.online_params)),
-                                      step=self.training_steps)
-                    tf.summary.scalar('TD Error', float(td_errors.mean()),
-                                      step=self.training_steps)
-                    tf.summary.scalar('SPRLoss', float(spr_loss.mean()),
-                                      step=self.training_steps)
-                    tf.summary.scalar('Inter-batch time', float(interbatch_time),
-                                      step=self.training_steps)
-                    tf.summary.scalar('Sampling time', float(sampling_time),
-                                      step=self.training_steps)
-                    tf.summary.scalar('Augmentation time', float(aug_time),
-                                      step=self.training_steps)
-                    tf.summary.scalar('Training time', float(training_time),
-                                      step=self.training_steps)
+                summary = tf.compat.v1.Summary(value=[
+                    tf.compat.v1.Summary.Value(
+                        tag='TotalLoss', simple_value=float(mean_loss)),
+                    tf.compat.v1.Summary.Value(
+                        tag='DQNLoss', simple_value=float(dqn_loss.mean())),
+                    tf.compat.v1.Summary.Value(
+                        tag='GradNorm', simple_value=float(grad_norm)),
+                    tf.compat.v1.Summary.Value(
+                        tag='PNorm', simple_value=float(tree_norm(self.online_params))),
+                    tf.compat.v1.Summary.Value(
+                        tag='TD Error', simple_value=float(td_errors.mean())),
+                    tf.compat.v1.Summary.Value(
+                        tag='SPRLoss', simple_value=float(spr_loss.mean())),
+                    tf.compat.v1.Summary.Value(
+                        tag='Inter-batch time', simple_value=float(interbatch_time)),
+                    tf.compat.v1.Summary.Value(
+                        tag='Sampling time', simple_value=float(sampling_time)),
+                    tf.compat.v1.Summary.Value(
+                        tag='Augmentation time', simple_value=float(aug_time)),
+                    tf.compat.v1.Summary.Value(
+                        tag='Training time', simple_value=float(training_time)),
+                ])
+                self.summary_writer.add_summary(summary, self.training_steps)
 
     def _store_transition(self,
                           last_observation,
@@ -706,36 +673,50 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
                           episode_end=False):
         """Stores a transition when in training mode."""
         is_prioritized = (
-            isinstance(self._replay,
-                       prioritized_replay_buffer.OutOfGraphPrioritizedReplayBuffer)
-            or isinstance(self._replay,
-                          tdrbs.PrioritizedJaxSubsequenceParallelEnvReplayBuffer))
+                isinstance(self._replay,
+                           prioritized_replay_buffer.OutOfGraphPrioritizedReplayBuffer)
+                or isinstance(self._replay,
+                              tdrbs.PrioritizedJaxSubsequenceParallelEnvReplayBuffer))
         if is_prioritized and priority is None:
             priority = onp.ones((last_observation.shape[0]))
             if self._replay_scheme == 'uniform':
-                pass
+                pass  # Already 1, doesn't matter
             else:
                 priority.fill(self._replay.sum_tree.max_recorded_priority)
 
         if not self.eval_mode:
             self._replay.add(
-                last_observation, action, reward, is_terminal,
-                *args, priority=priority, episode_end=episode_end)
+                last_observation,
+                action,
+                reward,
+                is_terminal,
+                *args,
+                priority=priority,
+                episode_end=episode_end)
 
     def _train_step(self):
-        """Runs a single training step."""
+        """Runs a single training step.
+
+        Runs training if both:
+            (1) A minimum number of frames have been added to the replay buffer.
+            (2) `training_steps` is a multiple of `update_period`.
+
+        Also, syncs weights from online_network_params to target_network_params if
+        training steps is a multiple of target update period.
+        """
         if self._replay.add_count > self.min_replay_history:
             if self.training_steps % self.update_period == 0:
                 for i in range(self._num_updates_per_train_step):
                     self._training_step_update(i)
+
             if self.training_steps % self.target_update_period == 0:
                 self._sync_weights()
-            if ((self.training_steps + 1)
-                    % (self.reset_every + self.updates_on_reset)
-                    == self.reset_offset
-                    and self.reset_every > 0):
+
+            if (self.training_steps + 1) % (self.reset_every + self.updates_on_reset) == self.reset_offset\
+                    and self.reset_every > 0:
                 print("Resetting weights at {}".format(self.training_steps))
                 self.reset_weights()
+
         self.training_steps += 1
 
     def _reset_state(self, n_envs):
@@ -743,14 +724,24 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
         self.state = onp.zeros(n_envs, *self.state_shape)
 
     def _record_observation(self, observation):
-        """Records an observation and updates state."""
+        """Records an observation and update state.
+
+        Extracts a frame from the observation vector and overwrites the oldest
+        frame in the state buffer.
+
+        Args:
+          observation: numpy array, an observation from the environment.
+        """
+        # Set current observation. We do the reshaping to handle environments
+        # without frame stacking.
         observation = observation.squeeze(-1)
         if len(observation.shape) == len(self.observation_shape):
             self._observation = onp.reshape(observation, self.observation_shape)
         else:
-            self._observation = onp.reshape(
-                observation,
-                (observation.shape[0], *self.observation_shape))
+            self._observation = onp.reshape(observation,
+                                            (observation.shape[0],
+                                             *self.observation_shape))
+        # Swap out the oldest frame with the current frame.
         self.state = onp.roll(self.state, -1, axis=-1)
         self.state[..., -1] = self._observation
 
@@ -764,8 +755,8 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
         self.state[env_id].fill(0)
 
     def delete_one(self, env_id):
-        self.state = onp.concatenate(
-            [self.state[:env_id], self.state[env_id + 1:]], 0)
+        self.state = onp.concatenate([self.state[:env_id],
+                                      self.state[env_id+1:]], 0)
 
     def cache_train_state(self):
         self.training_state = (copy.deepcopy(self.state),
@@ -773,19 +764,20 @@ class JaxSPRAgent(dqn_agent.JaxDQNAgent):
                                copy.deepcopy(self._observation))
 
     def restore_train_state(self):
-        (self.state,
-         self._last_observation,
-         self._observation) = self.training_state
+        self.state,\
+        self._last_observation,\
+        self._observation = self.training_state
 
     def log_transition(self, observation, action, reward, terminal, episode_end):
         self._last_observation = self._observation
         self._record_observation(observation)
+
         if not self.eval_mode:
-            self._store_transition(self._last_observation, action, reward,
-                                   terminal, episode_end=episode_end)
+            self._store_transition(self._last_observation, action, reward, terminal,
+                                   episode_end=episode_end)
 
     def step(self):
-        """Records the most recent transition, returns next action, trains if appropriate."""
+        """Records the most recent transition, returns the agent's next action, and trains if appropriate."""
         if not self.eval_mode:
             self._train_step()
         state = networks.process_inputs(self.state, data_augmentation=False)

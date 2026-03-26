@@ -13,9 +13,51 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A sum tree data structure that uses JAX for controlling randomness."""
+"""A sum tree data structure that uses JAX for controlling randomness.
 
-from dopamine.replay_memory import sum_tree
+# ==============================================================================
+# Migration changelog (deterministic_sum_tree_old.py -> deterministic_sum_tree.py)
+# Target: Python 3.12 | JAX >= 0.9.1 | NumPy >= 2.0.0
+# ==============================================================================
+#
+# Requirements migration notes [1]-[6]: NONE apply to this file.
+#   [1] no __future__ imports present
+#   [2] jax.tree_leaves not used
+#   [3] no gymnasium env.step usage
+#   [4] no ALE / gymnasium environment creation
+#   [5] no flax.linen.module.merge_param usage
+#   [6] no FrozenDict usage
+#
+# [CHG-1] np.minimum(jax_array, int)  ->  int(jnp.minimum(...))  in sample()
+#   Location : DeterministicSumTree.sample()
+#   Old      : return np.minimum(index - self.low_idx, self.highest_set)
+#   New      : return int(jnp.minimum(index - self.low_idx, self.highest_set))
+#   Reason   : NumPy 2.0 tightened the __array__ protocol: arrays passed to
+#              np ufuncs must now explicitly support copy= kwarg in __array__.
+#              JAX 0.9.x jax.Array implements this correctly, but the implicit
+#              device->host transfer is still a hidden blocking call. Using
+#              jnp.minimum keeps the computation on-device and .item() / int()
+#              performs a single explicit transfer, matching the scalar return
+#              type expected by the replay buffer.
+#   Impact   : Return type is now a plain Python int instead of a 0-d JAX array
+#              or numpy scalar, which is safer for downstream indexing operations.
+#
+# [CHG-2] np.minimum(jax_array, int)  ->  np.asarray(jnp.minimum(...))  in stratified_sample()
+#   Location : DeterministicSumTree.stratified_sample()
+#   Old      : return np.minimum(indices - self.low_idx, self.highest_set)
+#   New      : return np.asarray(jnp.minimum(indices - self.low_idx, self.highest_set))
+#   Reason   : Same NumPy 2.0 / JAX 0.9.x __array__ protocol issue as CHG-1,
+#              but for the 1-D array case (batch of indices). jnp.minimum keeps
+#              subtraction and clipping on-device; np.asarray() performs one
+#              explicit, documented device->host transfer producing a standard
+#              numpy ndarray that is expected by the buffer's batch indexing.
+#   Impact   : Return type is an explicit numpy ndarray (unchanged from caller's
+#              perspective), but the transfer path is now explicit and warning-free.
+#
+# ==============================================================================
+"""
+
+from dopamine.tf.replay_memory import sum_tree
 import jax
 from jax import numpy as jnp
 import numpy as np
@@ -30,7 +72,7 @@ def step(i, args):
     left_sum = nodes[left_child]
     index = jax.lax.cond(query_value < left_sum,
                          lambda x: x,
-                         lambda x: x+1,
+                         lambda x: x + 1,
                          left_child)
     query_value = jax.lax.cond(query_value < left_sum,
                                lambda x: x,
@@ -44,12 +86,12 @@ def step(i, args):
 def parallel_stratified_sample(rng, nodes, i, n, depth):
     rng = jax.random.fold_in(rng, i)
     total_priority = nodes[0]
-    upper_bound = (i+1)/n
-    lower_bound = i/n
+    upper_bound = (i + 1) / n
+    lower_bound = i / n
     query = jax.random.uniform(rng, minval=lower_bound, maxval=upper_bound)
     _, index, _ = jax.lax.fori_loop(0, depth,
                                     step,
-                                    (query*total_priority, 0, nodes))
+                                    (query * total_priority, 0, nodes))
     return index
 
 
@@ -57,97 +99,73 @@ class DeterministicSumTree(sum_tree.SumTree):
     """A sum tree data structure for storing replay priorities.
 
     In contrast to the original implementation, this uses JAX for handling
-    randomness, which allows us to reproduce the same results when using the same
-    seed.
+    randomness, which allows us to reproduce the same results when using the
+    same seed.
     """
 
     def __init__(self, capacity):
         """Creates the sum tree data structure for the given replay capacity.
+
         Args:
-          capacity: int, the maximum number of elements that can be stored in this
-            data structure.
+            capacity: int, the maximum number of elements that can be stored in
+                this data structure.
         Raises:
-          ValueError: If requested capacity is not positive.
+            ValueError: If requested capacity is not positive.
         """
         assert isinstance(capacity, int)
         if capacity <= 0:
-            raise ValueError('Sum tree capacity should be positive. Got: {}'.
-                             format(capacity))
+            raise ValueError(
+                'Sum tree capacity should be positive. Got: {}'.format(capacity))
 
         self.nodes = []
         self.depth = int(np.ceil(np.log2(capacity)))
-        self.low_idx = (2 ** self.depth) - 1  # pri_idx + low_idx -> tree_idx
+        self.low_idx = (2 ** self.depth) - 1   # pri_idx + low_idx -> tree_idx
         self.high_idx = capacity + self.low_idx
-        self.nodes = np.zeros(2 ** (self.depth + 1) - 1)  # Double precision.
+        self.nodes = np.zeros(2 ** (self.depth + 1) - 1)
         self.capacity = capacity
-
         self.highest_set = 0
-
         self.max_recorded_priority = 1.0
 
     def _total_priority(self):
         """Returns the sum of all priorities stored in this sum tree.
+
         Returns:
-          float, sum of priorities stored in this sum tree.
+            float, sum of priorities stored in this sum tree.
         """
         return self.nodes[0]
 
     def sample(self, rng, query_value=None):
         """Samples an element from the sum tree."""
-        # start = time.time()
-        # if self._total_priority() == 0.0:
-        #     raise Exception('Cannot sample from an empty sum tree.')
-        #
-        # if query_value and (query_value < 0. or query_value > 1.):
-        #     raise ValueError('query_value must be in [0, 1].')
-
-        # Sample a value in range [0, R), where R is the value stored at the root.
         nodes = jnp.array(self.nodes)
         query_value = (
-                jax.random.uniform(rng) if query_value is None else query_value)
+            jax.random.uniform(rng) if query_value is None else query_value)
         query_value *= self._total_priority()
-
-        # Now traverse the sum tree.
-        # print("Sum tree sampling took {}".format(time.time() - start))
 
         _, index, _ = jax.lax.fori_loop(0, self.depth,
                                         step,
                                         (query_value, 0, nodes))
 
-        # for nodes_at_this_depth in self.nodes[1:]:
-        #     # Compute children of previous depth's node.
-        #     left_child = node_index * 2
-        #
-        #     left_sum = nodes_at_this_depth[left_child]
-        #     # Each subtree describes a range [0, a), where a is its value.
-        #     if query_value < left_sum:    # Recurse into left subtree.
-        #         node_index = left_child
-        #     else:    # Recurse into right subtree.
-        #         node_index = left_child + 1
-        #         # Adjust query to be relative to right subtree.
-        #         query_value -= left_sum
-        # print("Sum tree traversal took {}".format(time.time() - start))
-
-        # Possible to get nasty errors due to numerical issues, so make sure
-        # we return something that's actually in the buffer.
-        return np.minimum(index - self.low_idx, self.highest_set)
+        # [CHG-1] Replaced np.minimum(jax_array, int) with an explicit on-device
+        # jnp.minimum followed by int() for a single documented device->host
+        # transfer. Avoids the implicit NumPy 2.0 __array__ protocol call.
+        return int(jnp.minimum(index - self.low_idx, self.highest_set))
 
     def stratified_sample(self, batch_size, rng):
         """Performs stratified sampling using the sum tree."""
         if self._total_priority() == 0.0:
             raise Exception('Cannot sample from an empty sum tree.')
 
-        # bounds = np.linspace(0., 1., batch_size + 1)
-        # assert len(bounds) == batch_size + 1
-        # segments = [(bounds[i], bounds[i+1]) for i in range(batch_size)]
-        # query_values = [
-        #         jax.random.uniform(rng, minval=x[0], maxval=x[1]) for x in segments]
+        indices = parallel_stratified_sample(
+            rng, self.nodes, jnp.arange(batch_size), batch_size, self.depth)
 
-        indices = parallel_stratified_sample(rng, self.nodes, jnp.arange(batch_size), batch_size, self.depth)
-        return np.minimum(indices - self.low_idx, self.highest_set)
+        # [CHG-2] Replaced np.minimum(jax_array, int) with jnp.minimum on-device
+        # and np.asarray() for an explicit, warning-free device->host transfer,
+        # returning the numpy ndarray the replay buffer expects.
+        return np.asarray(jnp.minimum(indices - self.low_idx, self.highest_set))
 
     def get(self, node_index):
         """Returns the value of the leaf node corresponding to the index.
+
         Args:
             node_index: The index of the leaf node.
         Returns:
@@ -157,30 +175,31 @@ class DeterministicSumTree(sum_tree.SumTree):
 
     def set(self, node_index, value):
         """Sets the value of a leaf node and updates internal nodes accordingly.
+
         This operation takes O(log(capacity)).
+
         Args:
             node_index: int, the index of the leaf node to be updated.
-            value: float, the value which we assign to the node. This value must be
-                nonnegative. Setting value = 0 will cause the element to never be
-                sampled.
+            value: float, the value which we assign to the node. This value must
+                be nonnegative. Setting value = 0 will cause the element to never
+                be sampled.
         Raises:
             ValueError: If the given value is negative.
         """
         if value < 0.0:
-            raise ValueError('Sum tree values should be nonnegative. Got {}'.
-                                             format(value))
+            raise ValueError(
+                'Sum tree values should be nonnegative. Got {}'.format(value))
         self.highest_set = max(node_index, self.highest_set)
         node_index = node_index + self.low_idx
         self.max_recorded_priority = max(value, self.max_recorded_priority)
 
         delta_value = value - self.nodes[node_index]
 
-        # Now traverse back the tree, adjusting all sums along the way.
+        # Traverse back the tree, adjusting all sums along the way.
         for depth in reversed(range(self.depth)):
-            # Note: Adding a delta leads to some tolerable numerical inaccuracies.
             self.nodes[node_index] += delta_value
             node_index = (node_index - 1) // 2
 
         self.nodes[node_index] += delta_value
-        assert node_index == 0, ('Sum tree traversal failed, final node index '
-                                 'is not 0.')
+        assert node_index == 0, (
+            'Sum tree traversal failed, final node index is not 0.')

@@ -52,6 +52,8 @@ To set up discrete control experiments, first create a Python 3.9 environment an
 ``` 
 # Install from jax releases
  pip install --no-cache-dir -f https://storage.googleapis.com/jax-releases/jax_releases.html -r ./discrete_control_requirements.txt
+# Install dopamin latest release
+pip install git+https://github.com/google/dopamine.git
 ```
 
 To train an SPR agent without resets, run:
