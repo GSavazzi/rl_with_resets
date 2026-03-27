@@ -86,6 +86,7 @@ from absl import logging
 from dopamine.discrete_domains import iteration_statistics
 from dopamine.discrete_domains import run_experiment
 from dopamine.discrete_domains import atari_lib
+from dopamine.metrics import statistics_instance
 import gin
 import tensorflow as tf
 import jax
@@ -180,6 +181,8 @@ class DataEfficientAtariRunner(run_experiment.Runner):
         self.train_state = None
         self._agent.reset_all(self._initialize_episode(self.train_envs))
         self._agent.cache_train_state()
+
+        self._statistics_log = {}  # accumulates all iterations, replicates old Logger
 
         try:
             if hasattr(self.train_envs[0].environment, "_game"):
@@ -414,7 +417,7 @@ class DataEfficientAtariRunner(run_experiment.Runner):
                      average_return)
         statistics.append({'eval_average_return': average_return})
         human_norm_return = normalize_score(average_return, self.game)
-        statistics.append({'train_average_normalized_score': human_norm_return})
+        statistics.append({'eval_average_normalized_score': human_norm_return})
         logging.info('Average normalized return per evaluation episode: %.2f',
                      human_norm_return)
         return num_episodes, average_return, human_norm_return
@@ -476,6 +479,20 @@ class DataEfficientAtariRunner(run_experiment.Runner):
             tf.summary.scalar('Eval/NormalizedScore', norm_score_eval,
                               step=iteration)
 
+    def _build_statistics_instances(self, data_lists, iteration):
+        """Convert data_lists dict to a list of StatisticsInstance objects."""
+        instances = []
+        for name, values in data_lists.items():
+            for value in values:
+                instances.append(
+                    statistics_instance.StatisticsInstance(
+                        step=iteration,
+                        name=name,
+                        value=value,
+                    ))
+        return instances
+
+
     def run_experiment(self):
         """Runs a full experiment, spread over multiple iterations."""
         logging.info('Beginning training...')
@@ -487,8 +504,10 @@ class DataEfficientAtariRunner(run_experiment.Runner):
         for iteration in range(self._start_iteration, self._num_iterations):
             statistics = self._run_one_iteration(iteration)
             self._log_experiment(iteration, statistics)
+            self._collector_dispatcher.write(self._build_statistics_instances(statistics, iteration))
             self._checkpoint_experiment(iteration)
             self._summary_writer.flush()
+            self._collector_dispatcher.flush()
 
 
 @gin.configurable
