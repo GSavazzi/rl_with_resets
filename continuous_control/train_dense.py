@@ -1,5 +1,36 @@
 import os
 import random
+import sys, importlib.abc, importlib.machinery
+
+class _TFPJaxOpsPatcher(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    _TARGET = "tensorflow_probability.python.internal.backend.jax.ops"
+    _OLD    = "jax.interpreters.xla.pytype_aval_mappings"
+    _NEW    = "jax.core.pytype_aval_mappings"
+
+    def find_spec(self, fullname, path, target=None):
+        if fullname != self._TARGET:
+            return None
+        # Delegate to remaining finders, then hijack the loader
+        for finder in sys.meta_path[1:]:
+            spec = finder.find_spec(fullname, path, target)
+            if spec is not None:
+                spec.loader = self
+                self._origin = spec.origin
+                return spec
+        return None
+
+    def create_module(self, spec):
+        return None  # use default semantics
+
+    def exec_module(self, module):
+        import pathlib
+        src = pathlib.Path(self._origin).read_text()
+        patched = src.replace(self._OLD, self._NEW)
+        exec(compile(patched, self._origin, "exec"), module.__dict__)
+        print("✅ TFP JAX ops patched in-memory.")
+
+# Register once at script startup — must come before `import tensorflow_probability`
+sys.meta_path.insert(0, _TFPJaxOpsPatcher())
 
 import numpy as np
 import tqdm
