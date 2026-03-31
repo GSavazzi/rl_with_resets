@@ -1,7 +1,7 @@
 from typing import Optional
 
 import os
-import gym
+import gymnasium as gym                                   # CHANGE 1
 import pickle
 import numpy as np
 
@@ -29,11 +29,9 @@ class ReplayBuffer(Dataset):
                          size=0)
 
         self.size = 0
-
         self.insert_index = 0
         self.capacity = capacity
-        
-        # for saving the buffer
+
         self.n_parts = 4
         assert self.capacity % self.n_parts == 0
 
@@ -60,8 +58,7 @@ class ReplayBuffer(Dataset):
         self.rewards[:num_samples] = dataset.rewards[indices]
         self.masks[:num_samples] = dataset.masks[indices]
         self.dones_float[:num_samples] = dataset.dones_float[indices]
-        self.next_observations[:num_samples] = dataset.next_observations[
-            indices]
+        self.next_observations[:num_samples] = dataset.next_observations[indices]
 
         self.insert_index = num_samples
         self.size = num_samples
@@ -80,10 +77,9 @@ class ReplayBuffer(Dataset):
         self.size = min(self.size + 1, self.capacity)
 
     def save(self, data_path: str):
-        # because of memory limits, we will dump the buffer into multiple files
         os.makedirs(os.path.dirname(data_path), exist_ok=True)
         chunk_size = self.capacity // self.n_parts
-        
+
         for i in range(self.n_parts):
             data_chunk = [
                 self.observations[i*chunk_size : (i+1)*chunk_size],
@@ -93,21 +89,23 @@ class ReplayBuffer(Dataset):
                 self.dones_float[i*chunk_size : (i+1)*chunk_size],
                 self.next_observations[i*chunk_size : (i+1)*chunk_size]
             ]
-            
+
             data_path_splitted = data_path.split('buffer')
             data_path_splitted[-1] = f'_chunk_{i}{data_path_splitted[-1]}'
             data_path_chunk = 'buffer'.join(data_path_splitted)
-            pickle.dump(data_chunk, open(data_path_chunk, 'wb'))
+            with open(data_path_chunk, 'wb') as f:       # best-practice fix
+                pickle.dump(data_chunk, f)
 
     def load(self, data_path: str):
         chunk_size = self.capacity // self.n_parts
         total_size = 0
-        
-        for i in range(self.n_parts):            
+
+        for i in range(self.n_parts):
             data_path_splitted = data_path.split('buffer')
             data_path_splitted[-1] = f'_chunk_{i}{data_path_splitted[-1]}'
             data_path_chunk = 'buffer'.join(data_path_splitted)
-            data_chunk = pickle.load(open(data_path_chunk, "rb"))
+            with open(data_path_chunk, 'rb') as f:        # best-practice fix
+                data_chunk = pickle.load(f)
             total_size += len(data_chunk[0])
 
             self.observations[i*chunk_size : (i+1)*chunk_size], \
@@ -116,7 +114,7 @@ class ReplayBuffer(Dataset):
             self.masks[i*chunk_size : (i+1)*chunk_size], \
             self.dones_float[i*chunk_size : (i+1)*chunk_size], \
             self.next_observations[i*chunk_size : (i+1)*chunk_size] = data_chunk
-            
+
         if self.capacity != total_size:
             print('WARNING: buffer capacity does not match size of loaded data!')
         self.insert_index = 0

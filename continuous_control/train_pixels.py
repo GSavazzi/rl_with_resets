@@ -15,7 +15,9 @@ from continuous_control.datasets import ReplayBuffer
 from continuous_control.evaluation import evaluate
 from continuous_control.utils import make_env
 
+
 FLAGS = flags.FLAGS
+
 
 flags.DEFINE_string('exp', '', 'Experiment description (not actually used).')
 flags.DEFINE_string('env_name', 'quadruped-run', 'Environment name.')
@@ -32,7 +34,8 @@ flags.DEFINE_integer(
     'action_repeat', None,
     'Action repeat, if None, uses 2 or PlaNet default values.')
 flags.DEFINE_integer('reset_interval', 25000, 'Periodicity of resets.')
-flags.DEFINE_boolean('resets', False, 'Periodically reset last actor / critic layers.')
+flags.DEFINE_boolean('resets', False,
+                     'Periodically reset last actor / critic layers.')
 flags.DEFINE_boolean('tqdm', True, 'Use tqdm progress bar.')
 flags.DEFINE_boolean('save_video', False, 'Save videos during evaluation.')
 config_flags.DEFINE_config_file(
@@ -40,6 +43,7 @@ config_flags.DEFINE_config_file(
     'configs/drq.py',
     'File path to the training hyperparameter configuration.',
     lock_config=False)
+
 
 PLANET_ACTION_REPEAT = {
     'cartpole-swingup': 8,
@@ -91,19 +95,20 @@ def main(_):
 
     assert kwargs.pop('algo') == 'drq'
     replay_buffer_size = kwargs.pop('replay_buffer_size')
-    
+
     obs_demo = env.observation_space.sample()
     action_demo = env.action_space.sample()
     agent = DrQLearner(FLAGS.seed,
                        obs_demo[np.newaxis],
                        action_demo[np.newaxis], **kwargs)
-    
+
     action_dim = env.action_space.shape[0]
     replay_buffer = ReplayBuffer(env.observation_space, action_dim,
                                  replay_buffer_size or FLAGS.max_steps)
-    
+
     eval_returns = []
-    observation, done = env.reset(), False
+    observation, _ = env.reset()                         # reset: obs, info
+    done = False
     for i in tqdm.tqdm(range(1, FLAGS.max_steps // action_repeat + 1),
                        smoothing=0.1,
                        disable=not FLAGS.tqdm):
@@ -111,19 +116,20 @@ def main(_):
             action = env.action_space.sample()
         else:
             action = agent.sample_actions(observation)
-        next_observation, reward, done, info = env.step(action)
 
-        if not done or 'TimeLimit.truncated' in info:
-            mask = 1.0
-        else:
-            mask = 0.0
+        next_observation, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
 
-        replay_buffer.insert(observation, action, reward, mask, float(done),
+        # mask: 0 only on true termination, 1 on mid-episode or truncation
+        mask = 0.0 if terminated else 1.0
+        replay_buffer.insert(observation, action, reward, mask,
+                             float(terminated or truncated),
                              next_observation)
         observation = next_observation
 
         if done:
-            observation, done = env.reset(), False
+            observation, _ = env.reset()
+            done = False
 
         if i >= FLAGS.start_training:
             batch = replay_buffer.sample(FLAGS.batch_size)
@@ -137,40 +143,39 @@ def main(_):
             np.savetxt(os.path.join(FLAGS.save_dir, f'{FLAGS.seed}.txt'),
                        eval_returns,
                        fmt=['%d', '%.1f'])
-        
+
         if FLAGS.resets and i % FLAGS.reset_interval == 0:
             # shared enc params: 388416
             # critic head(s) params: 366232
             # actor head params: 286882
-            # so we reset roughtly half of the agent (both layer and param wise)
-            
+            # so we reset roughly half of the agent (both layer and param wise)
+
             # save encoder parameters
             old_critic_enc = agent.critic.params['SharedEncoder']
             # target critic has its own copy of encoder
             old_target_critic_enc = agent.target_critic.params['SharedEncoder']
             # save encoder optimizer statistics
             old_critic_enc_opt = agent.critic.opt_state_enc
-            
+
             # create new agent: note that the temperature is new as well
             agent = DrQLearner(FLAGS.seed + i,
                                env.observation_space.sample()[np.newaxis],
                                env.action_space.sample()[np.newaxis], **kwargs)
-            
+
             # resetting critic: copy encoder parameters and optimizer statistics
-            new_critic_params = agent.critic.params.copy(
-                add_or_replace={'SharedEncoder': old_critic_enc})
-            agent.critic = agent.critic.replace(params=new_critic_params, 
+            new_critic_params = {**agent.critic.params,
+                                 'SharedEncoder': old_critic_enc}
+            agent.critic = agent.critic.replace(params=new_critic_params,
                                                 opt_state_enc=old_critic_enc_opt)
-            
+
             # resetting actor: actor in DrQ uses critic's encoder
-            # note we could have copied enc optimizer here but actor does not affect enc
-            new_actor_params = agent.actor.params.copy(
-                add_or_replace={'SharedEncoder': old_critic_enc})
+            new_actor_params = {**agent.actor.params,
+                                'SharedEncoder': old_critic_enc}
             agent.actor = agent.actor.replace(params=new_actor_params)
-            
+
             # resetting target critic
-            new_target_critic_params = agent.target_critic.params.copy(
-                add_or_replace={'SharedEncoder': old_target_critic_enc})
+            new_target_critic_params = {**agent.target_critic.params,
+                                        'SharedEncoder': old_target_critic_enc}
             agent.target_critic = agent.target_critic.replace(
                 params=new_target_critic_params)
 

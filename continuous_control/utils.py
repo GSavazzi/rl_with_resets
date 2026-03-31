@@ -1,8 +1,7 @@
 from typing import Optional
 
-import gym
-from gym.wrappers import RescaleAction
-from gym.wrappers.pixel_observation import PixelObservationWrapper
+import gymnasium as gym
+from gymnasium.wrappers import RescaleAction, AddRenderObservation
 
 from continuous_control import wrappers
 from continuous_control.wrappers import VideoRecorder
@@ -20,18 +19,34 @@ def make_env(env_name: str,
              sticky: bool = False,
              gray_scale: bool = False,
              flatten: bool = True) -> gym.Env:
-    # Check if the env is in gym.
-    all_envs = gym.envs.registry.all()
-    env_ids = [env_spec.id for env_spec in all_envs]
 
-    if env_name in env_ids:
-        env = gym.make(env_name)
+    if env_name in gym.envs.registry:
+        camera_id = 0
+        # width/height only passed when from_pixels=True.
+        # Non-MuJoCo envs (e.g. CartPole) do not accept these kwargs and would crash.
+        make_kwargs = {'render_mode': 'rgb_array' if from_pixels else None}
+        if from_pixels:
+            make_kwargs['width'] = image_size
+            make_kwargs['height'] = image_size
+        env = gym.make(env_name, **make_kwargs)
     else:
         domain_name, task_name = env_name.split('-')
-        env = wrappers.DMCEnv(domain_name=domain_name,
-                              task_name=task_name,
-                              task_kwargs={'random': seed})
+        camera_id = 2 if domain_name == 'quadruped' else 0
+        env = wrappers.DMCEnv(
+            domain_name=domain_name,
+            task_name=task_name,
+            task_kwargs={'random': seed},
+            render_mode='rgb_array' if from_pixels else None,
+            # height/width/camera_id stored as instance state in DMCEnv;
+            # None when not rendering so dm_control uses its own defaults
+            # if render() is ever called unexpectedly.
+            height=image_size if from_pixels else None,
+            width=image_size if from_pixels else None,
+            camera_id=camera_id,
+        )
 
+    # Flatten Dict observation spaces before any wrapper inspects obs shape.
+    # Must happen early — wrappers like EpisodeMonitor may read observation_space.
     if flatten and isinstance(env.observation_space, gym.spaces.Dict):
         env = gym.wrappers.FlattenObservation(env)
 
@@ -41,26 +56,24 @@ def make_env(env_name: str,
     if action_repeat > 1:
         env = wrappers.RepeatAction(env, action_repeat)
 
+    # RescaleAction requires a Box action space — valid for all DMC and MuJoCo envs.
     env = RescaleAction(env, -1.0, 1.0)
 
+    # VideoRecorder wraps before AddRenderObservation so it records the raw
+    # environment render, not the augmented pixel observation.
     if save_folder is not None:
         env = VideoRecorder(env, save_folder=save_folder)
 
     if from_pixels:
-        if env_name in env_ids:
-            camera_id = 0
-        else:
-            camera_id = 2 if domain_name == 'quadruped' else 0
-        env = PixelObservationWrapper(env,
-                                      pixels_only=pixels_only,
-                                      render_kwargs={
-                                          'pixels': {
-                                              'height': image_size,
-                                              'width': image_size,
-                                              'camera_id': camera_id
-                                          }
-                                      })
-        env = wrappers.TakeKey(env, take_key='pixels')
+        env = AddRenderObservation(env, render_only=pixels_only, render_key='pixels')
+
+        # TakeKey is only needed when render_only=False (pixels_only=False).
+        # In that case AddRenderObservation returns a Dict with 'pixels' mixed in
+        # alongside the original obs — TakeKey extracts just the image.
+        # When render_only=True, the obs is already a plain Box — no key to extract.
+        if not pixels_only:
+            env = wrappers.TakeKey(env, take_key='pixels')
+
         if gray_scale:
             env = wrappers.RGB2Gray(env)
     else:
@@ -72,7 +85,7 @@ def make_env(env_name: str,
     if sticky:
         env = wrappers.StickyActionEnv(env)
 
-    env.seed(seed)
+    # env.seed() removed in Gymnasium v1.0 — seed action/obs spaces directly.
     env.action_space.seed(seed)
     env.observation_space.seed(seed)
 

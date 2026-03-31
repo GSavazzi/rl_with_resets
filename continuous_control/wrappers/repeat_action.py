@@ -1,4 +1,4 @@
-import gym
+import gymnasium as gym                              # CHANGE 1
 import numpy as np
 
 from continuous_control.wrappers.common import TimeStep
@@ -15,10 +15,11 @@ class RepeatAction(gym.Wrapper):
         combined_info = {}
 
         for _ in range(self._action_repeat):
-            obs, reward, done, info = self.env.step(action)
+            obs, reward, terminated, truncated, info = self.env.step(action)  # CHANGE 2
+            done = terminated or truncated                                      # CHANGE 2
             total_reward += reward
             combined_info.update(info)
             if done:
                 break
 
-        return obs, total_reward, done, combined_info
+        return obs, total_reward, terminated, truncated, combined_info         # CHANGE 2

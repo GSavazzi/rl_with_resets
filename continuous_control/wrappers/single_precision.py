@@ -1,8 +1,8 @@
 import copy
 
-import gym
+import gymnasium as gym                              # CHANGE 1
 import numpy as np
-from gym.spaces import Box, Dict
+from gymnasium.spaces import Box, Dict               # CHANGE 1
 
 
 class SinglePrecision(gym.ObservationWrapper):

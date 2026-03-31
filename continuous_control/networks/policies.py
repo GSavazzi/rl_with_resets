@@ -23,14 +23,13 @@ class MSEPolicy(nn.Module):
 
     @nn.compact
     def __call__(self,
-                 observations: jnp.ndarray,
+                 observations: jax.Array,          # CHANGE 1
                  temperature: float = 1.0,
-                 training: bool = False) -> jnp.ndarray:
+                 training: bool = False) -> jax.Array:  # CHANGE 1
         outputs = MLP(self.hidden_dims,
                       activate_final=True,
                       dropout_rate=self.dropout_rate)(observations,
                                                       training=training)
-
         actions = nn.Dense(self.action_dim,
                            kernel_init=default_init())(outputs)
         return nn.tanh(actions)
@@ -48,7 +47,7 @@ class NormalTanhPolicy(nn.Module):
 
     @nn.compact
     def __call__(self,
-                 observations: jnp.ndarray,
+                 observations: jax.Array,          # CHANGE 1
                  temperature: float = 1.0,
                  training: bool = False) -> tfd.Distribution:
         outputs = MLP(self.hidden_dims,
@@ -68,7 +67,6 @@ class NormalTanhPolicy(nn.Module):
 
         log_std_min = self.log_std_min or LOG_STD_MIN
         log_std_max = self.log_std_max or LOG_STD_MAX
-        #log_stds = jnp.clip(log_stds, log_std_min, log_std_max)
         # suggested by Ilya for stability
         log_stds = log_std_min + (log_std_max - log_std_min) * 0.5 * (1 + nn.tanh(log_stds))
 
@@ -93,7 +91,7 @@ class NormalTanhMixturePolicy(nn.Module):
 
     @nn.compact
     def __call__(self,
-                 observations: jnp.ndarray,
+                 observations: jax.Array,          # CHANGE 1
                  temperature: float = 1.0,
                  training: bool = False) -> tfd.Distribution:
         outputs = MLP(self.hidden_dims,
@@ -137,7 +135,7 @@ def _sample_actions(
         actor_params: Params,
         observations: np.ndarray,
         temperature: float = 1.0,
-        distribution: str = 'log_prob') -> Tuple[PRNGKey, jnp.ndarray]:
+        distribution: str = 'log_prob') -> Tuple[PRNGKey, jax.Array]:  # CHANGE 1
     if distribution == 'det':
         return rng, actor_def.apply({'params': actor_params}, observations,
                                     temperature)
@@ -154,6 +152,6 @@ def sample_actions(
         actor_params: Params,
         observations: np.ndarray,
         temperature: float = 1.0,
-        distribution: str = 'log_prob') -> Tuple[PRNGKey, jnp.ndarray]:
+        distribution: str = 'log_prob') -> Tuple[PRNGKey, jax.Array]:  # CHANGE 1
     return _sample_actions(rng, actor_def, actor_params, observations,
                            temperature, distribution)

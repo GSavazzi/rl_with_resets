@@ -3,7 +3,6 @@
 import functools
 from typing import Optional, Sequence, Tuple, Union
 
-from optax._src import base
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -20,7 +19,7 @@ from continuous_control.networks import policies
 from continuous_control.networks.common import InfoDict, Model, PRNGKey, ModelDecoupleOpt
 
 
-@functools.partial(jax.jit, static_argnames=('update_target'))
+@functools.partial(jax.jit, static_argnames=('update_target',))  # trailing comma: explicit tuple
 def _update_jit(
     rng: PRNGKey, actor: Model, critic: Model, target_critic: Model,
     temp: Model, batch: Batch, discount: float, tau: float,
@@ -36,28 +35,20 @@ def _update_jit(
                            next_observations=next_observations)
 
     rng, key = jax.random.split(rng)
-    new_critic, critic_info = update_critic(key,
-                                            actor,
-                                            critic,
-                                            target_critic,
-                                            temp,
-                                            batch,
-                                            discount,
-                                            soft_critic=True)
+    new_critic, critic_info = update_critic(key, actor, critic, target_critic,
+                                            temp, batch, discount, soft_critic=True)
     if update_target:
         new_target_critic = target_update(new_critic, target_critic, tau)
     else:
         new_target_critic = target_critic
 
-    # Use critic conv layers in actor:
-    new_actor_params = actor.params.copy(
-        add_or_replace={'SharedEncoder': new_critic.params['SharedEncoder']})
+    # Use critic conv layers in actor — CHANGE 3: plain dict unpacking replaces FrozenDict.copy()
+    new_actor_params = {**actor.params, 'SharedEncoder': new_critic.params['SharedEncoder']}
     actor = actor.replace(params=new_actor_params)
 
     rng, key = jax.random.split(rng)
     new_actor, actor_info = update_actor(key, actor, new_critic, temp, batch)
-    new_temp, alpha_info = temperature.update(temp, actor_info['entropy'],
-                                              target_entropy)
+    new_temp, alpha_info = temperature.update(temp, actor_info['entropy'], target_entropy)
 
     return rng, new_actor, new_critic, new_target_critic, new_temp, {
         **critic_info,
@@ -69,8 +60,8 @@ def _update_jit(
 class DrQLearner(object):
     def __init__(self,
                  seed: int,
-                 observations: jnp.ndarray,
-                 actions: jnp.ndarray,
+                 observations: jax.Array,      # CHANGE 2
+                 actions: jax.Array,            # CHANGE 2
                  actor_lr: float = 3e-4,
                  critic_lr: float = 3e-4,
                  temp_lr: float = 3e-4,
@@ -107,12 +98,11 @@ class DrQLearner(object):
 
         critic_def = DrQDoubleCritic(hidden_dims, cnn_features, cnn_strides,
                                      cnn_padding, latent_dim)
-
         critic = ModelDecoupleOpt.create(critic_def,
                                          inputs=[critic_key, observations, actions],
                                          tx=optax.adam(learning_rate=critic_lr),
                                          tx_enc=optax.adam(learning_rate=critic_lr))
-            
+
         target_critic = Model.create(
             critic_def, inputs=[critic_key, observations, actions])
 
@@ -129,13 +119,11 @@ class DrQLearner(object):
 
     def sample_actions(self,
                        observations: np.ndarray,
-                       temperature: float = 1.0) -> jnp.ndarray:
+                       temperature: float = 1.0) -> jax.Array:    # CHANGE 2
         rng, actions = policies.sample_actions(self.rng, self.actor.apply_fn,
                                                self.actor.params, observations,
                                                temperature)
-
         self.rng = rng
-
         actions = np.asarray(actions)
         return np.clip(actions, -1, 1)
 

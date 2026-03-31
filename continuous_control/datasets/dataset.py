@@ -81,7 +81,6 @@ class Dataset(object):
             episode_return = 0
             for _, _, rew, _, _, _ in traj:
                 episode_return += rew
-
             return episode_return
 
         trajs.sort(key=compute_returns)
@@ -124,14 +123,12 @@ class Dataset(object):
             episode_return = 0
             for _, _, rew, _, _, _ in traj:
                 episode_return += rew
-
             return episode_return
 
         trajs.sort(key=compute_returns)
 
         N = int(len(trajs) * percentile / 100)
         N = max(1, N)
-
         trajs = trajs[-N:]
 
         (self.observations, self.actions, self.rewards, self.masks,
@@ -150,7 +147,6 @@ class Dataset(object):
 
         N = int(len(trajs) * percentage / 100)
         N = max(1, N)
-
         trajs = trajs[-N:]
 
         (self.observations, self.actions, self.rewards, self.masks,

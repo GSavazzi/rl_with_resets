@@ -1,6 +1,6 @@
 import time
 
-import gym
+import gymnasium as gym                              # CHANGE 1
 import numpy as np
 
 from continuous_control.wrappers.common import TimeStep
@@ -19,7 +19,8 @@ class EpisodeMonitor(gym.ActionWrapper):
         self.start_time = time.time()
 
     def step(self, action: np.ndarray) -> TimeStep:
-        observation, reward, done, info = self.env.step(action)
+        observation, reward, terminated, truncated, info = self.env.step(action)  # CHANGE 2
+        done = terminated or truncated                    # CHANGE 2
 
         self.reward_sum += reward
         self.episode_length += 1
@@ -36,8 +37,8 @@ class EpisodeMonitor(gym.ActionWrapper):
                 info['episode']['return'] = self.get_normalized_score(
                     info['episode']['return']) * 100.0
 
-        return observation, reward, done, info
+        return observation, reward, terminated, truncated, info  # CHANGE 2
 
-    def reset(self) -> np.ndarray:
+    def reset(self, seed=None, options=None) -> tuple:   # CHANGE 3
         self._reset_stats()
-        return self.env.reset()
+        return self.env.reset(seed=seed, options=options) # CHANGE 3

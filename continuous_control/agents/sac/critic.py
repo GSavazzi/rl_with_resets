@@ -8,7 +8,7 @@ from continuous_control.networks.common import InfoDict, Model, Params, PRNGKey,
 
 
 def target_update(critic: Model, target_critic: Model, tau: float) -> Model:
-    new_target_params = jax.tree_multimap(
+    new_target_params = jax.tree.map(                          # CHANGE 1
         lambda p, tp: p * tau + tp * (1 - tau), critic.params,
         target_critic.params)
 
@@ -29,16 +29,14 @@ def update(key: PRNGKey, actor: Model, critic: Model, target_critic: Model,
     if soft_critic:
         target_q -= discount * batch.masks * temp() * next_log_probs
 
-    def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
-        # q1, q2 = critic.apply({'params': critic_params}, batch.observations,
-        #                       batch.actions)
-        critic_fn = lambda actions: critic.apply({'params': critic_params}, 
+    def critic_loss_fn(critic_params: Params) -> Tuple[jax.Array, InfoDict]:  # CHANGE 2
+        critic_fn = lambda actions: critic.apply({'params': critic_params},
                                                  batch.observations, actions)
         def _critic_fn(actions):
             q1, q2 = critic_fn(actions)
-            return 0.5*(q1 + q2).mean(), (q1, q2)
+            return 0.5 * (q1 + q2).mean(), (q1, q2)
 
-        (_, (q1, q2)), action_grad = jax.value_and_grad(_critic_fn, 
+        (_, (q1, q2)), action_grad = jax.value_and_grad(_critic_fn,
                                                         has_aux=True)(
                                                             batch.actions)
         critic_loss = ((q1 - target_q)**2 + (q2 - target_q)**2).mean()

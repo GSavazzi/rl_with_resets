@@ -1,6 +1,6 @@
-import gym
+import gymnasium as gym                          # CHANGE 1
 import numpy as np
-from gym import Wrapper
+from gymnasium import Wrapper                    # CHANGE 1
 
 
 def make_non_absorbing(observation):
@@ -23,31 +23,35 @@ class AbsorbingStatesWrapper(Wrapper):
         self._done = False
         self._absorbing = False
         self._info = {}
-        return make_non_absorbing(self.env.reset(**kwargs))
+        obs, info = self.env.reset(**kwargs)                   # CHANGE 2
+        return make_non_absorbing(obs), info                   # CHANGE 2
 
     def step(self, action):
         if not self._done:
-            observation, reward, done, info = self.env.step(action)
+            observation, reward, terminated, truncated, info = self.env.step(action)  # CHANGE 3
             observation = make_non_absorbing(observation)
-            self._done = done
+            self._done = terminated or truncated               # CHANGE 3
             self._info = info
-            truncated_done = 'TimeLimit.truncated' in info
-            return observation, reward, truncated_done, info
+            # Absorbing states logic: on true termination, return done=False
+            # so the caller continues and receives the absorbing state next step.
+            # On truncation (time limit), end the episode normally.
+            return observation, reward, False, truncated, info # CHANGE 3
         else:
             if not self._absorbing:
                 self._absorbing = True
-                return self._absorbing_state, 0.0, False, self._info
+                return self._absorbing_state, 0.0, False, False, self._info  # CHANGE 3
             else:
-                return self._absorbing_state, 0.0, True, self._info
+                return self._absorbing_state, 0.0, True, False, self._info   # CHANGE 3
 
 
 if __name__ == '__main__':
-    env = gym.make('Hopper-v2')
+    env = gym.make('Hopper-v4')                               # CHANGE 4: v2 → v4
     env = AbsorbingStatesWrapper(env)
-    env.reset()
+    obs, info = env.reset()                                   # CHANGE 4
 
     done = False
     while not done:
         action = env.action_space.sample()
-        obs, reward, done, info = env.step(action)
+        obs, reward, terminated, truncated, info = env.step(action)  # CHANGE 4
+        done = terminated or truncated                        # CHANGE 4
         print(obs, done)

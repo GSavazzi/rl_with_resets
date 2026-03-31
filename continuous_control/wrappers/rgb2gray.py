@@ -1,4 +1,4 @@
-import gym
+import gymnasium as gym                              # CHANGE 1
 import numpy as np
 
 

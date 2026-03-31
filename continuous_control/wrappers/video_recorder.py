@@ -1,14 +1,13 @@
 import os
 
-import gym
+import cv2                                                     # ADD
+import gymnasium as gym
 import imageio
 import numpy as np
 
 from continuous_control.wrappers.common import TimeStep
 
 
-# Take from
-# https://github.com/denisyarats/pytorch_sac/
 class VideoRecorder(gym.Wrapper):
     def __init__(self,
                  env: gym.Env,
@@ -31,23 +30,20 @@ class VideoRecorder(gym.Wrapper):
             pass
 
     def step(self, action: np.ndarray) -> TimeStep:
-
-        frame = self.env.render(mode='rgb_array',
-                                height=self.height,
-                                width=self.width)
+        frame = self.env.render()                              # FIX: no kwargs in Gymnasium ≥0.26
 
         if frame is None:
-            try:
-                frame = self.sim.render(width=self.width,
-                                        height=self.height,
-                                        mode='offscreen')
-                frame = np.flipud(frame)
-            except:
-                raise NotImplementedError('Rendering is not implemented.')
+            raise NotImplementedError('Rendering is not implemented.')
+
+        # Resize if the env renders at a different resolution than requested
+        if frame.shape[0] != self.height or frame.shape[1] != self.width:
+            frame = cv2.resize(frame, (self.width, self.height),
+                               interpolation=cv2.INTER_AREA)   # ADD
 
         self.frames.append(frame)
 
-        observation, reward, done, info = self.env.step(action)
+        observation, reward, terminated, truncated, info = self.env.step(action)
+        done = terminated or truncated
 
         if done:
             save_file = os.path.join(self.save_folder,
@@ -56,4 +52,4 @@ class VideoRecorder(gym.Wrapper):
             self.frames = []
             self.current_episode += 1
 
-        return observation, reward, done, info
+        return observation, reward, terminated, truncated, info

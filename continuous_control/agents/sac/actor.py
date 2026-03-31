@@ -9,7 +9,7 @@ from continuous_control.networks.common import InfoDict, Model, Params, PRNGKey,
 
 def update(key: PRNGKey, actor: Model, critic: Model, temp: Model,
            batch: Batch) -> Tuple[Model, InfoDict]:
-    def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
+    def actor_loss_fn(actor_params: Params) -> Tuple[jax.Array, InfoDict]:  # CHANGE 1
         dist = actor.apply({'params': actor_params}, batch.observations)
         actions = dist.sample(seed=key)
         log_probs = dist.log_prob(actions)

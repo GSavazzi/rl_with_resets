@@ -17,7 +17,7 @@ from continuous_control.networks import critic_net, policies
 from continuous_control.networks.common import InfoDict, Model, PRNGKey
 
 
-@functools.partial(jax.jit, static_argnames=('update_target'))
+@functools.partial(jax.jit, static_argnames=('update_target',))  # CHANGE 1
 def _update_jit(
     rng: PRNGKey, actor: Model, critic: Model, target_critic: Model,
     temp: Model, batch: Batch, discount: float, tau: float,
@@ -25,14 +25,8 @@ def _update_jit(
 ) -> Tuple[PRNGKey, Model, Model, Model, Model, InfoDict]:
 
     rng, key = jax.random.split(rng)
-    new_critic, critic_info = update_critic(key,
-                                            actor,
-                                            critic,
-                                            target_critic,
-                                            temp,
-                                            batch,
-                                            discount,
-                                            soft_critic=True)
+    new_critic, critic_info = update_critic(key, actor, critic, target_critic,
+                                            temp, batch, discount, soft_critic=True)
     if update_target:
         new_target_critic = target_update(new_critic, target_critic, tau)
     else:
@@ -53,8 +47,8 @@ def _update_jit(
 class SACLearner(object):
     def __init__(self,
                  seed: int,
-                 observations: jnp.ndarray,
-                 actions: jnp.ndarray,
+                 observations: jax.Array,       # CHANGE 2
+                 actions: jax.Array,             # CHANGE 2
                  actor_lr: float = 3e-4,
                  critic_lr: float = 3e-4,
                  temp_lr: float = 3e-4,
@@ -65,7 +59,8 @@ class SACLearner(object):
                  target_entropy: Optional[float] = None,
                  init_temperature: float = 1.0):
         """
-        An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
+        An implementation of the version of Soft-Actor-Critic described in
+        https://arxiv.org/abs/1812.05905
         """
 
         action_dim = actions.shape[-1]
@@ -81,6 +76,7 @@ class SACLearner(object):
 
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
+
         actor_def = policies.NormalTanhPolicy(hidden_dims, action_dim)
         actor = Model.create(actor_def,
                              inputs=[actor_key, observations],
@@ -102,12 +98,11 @@ class SACLearner(object):
         self.target_critic = target_critic
         self.temp = temp
         self.rng = rng
-
         self.step = 1
 
     def sample_actions(self,
                        observations: np.ndarray,
-                       temperature: float = 1.0) -> jnp.ndarray:
+                       temperature: float = 1.0) -> jax.Array:  # CHANGE 2
         rng, actions = policies.sample_actions(self.rng, self.actor.apply_fn,
                                                self.actor.params, observations,
                                                temperature)

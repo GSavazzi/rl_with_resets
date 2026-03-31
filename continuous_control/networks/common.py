@@ -7,29 +7,30 @@ import jax
 import jax.numpy as jnp
 import optax
 
+
 def tree_norm(tree):
-    return jnp.sqrt(sum((x**2).sum() for x in jax.tree_leaves(tree)))
+    return jnp.sqrt(sum((x**2).sum() for x in jax.tree.leaves(tree)))
+
 
 def default_init(scale: Optional[float] = jnp.sqrt(2)):
     return nn.initializers.orthogonal(scale)
 
 
 PRNGKey = Any
-Params = flax.core.FrozenDict[str, Any]
-PRNGKey = Any
+Params = Dict[str, Any]
 Shape = Sequence[int]
-Dtype = Any  # this could be a real type?
+Dtype = Any
 InfoDict = Dict[str, float]
 
 
 class MLP(nn.Module):
     hidden_dims: Sequence[int]
-    activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
+    activations: Callable[[jax.Array], jax.Array] = nn.relu
     activate_final: int = False
     dropout_rate: Optional[float] = None
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray, training: bool = False) -> jnp.ndarray:
+    def __call__(self, x: jax.Array, training: bool = False) -> jax.Array:
         for i, size in enumerate(self.hidden_dims):
             x = nn.Dense(size, kernel_init=default_init())(x)
             if i + 1 < len(self.hidden_dims) or self.activate_final:
@@ -52,11 +53,10 @@ class Model:
     @classmethod
     def create(cls,
                model_def: nn.Module,
-               inputs: Sequence[jnp.ndarray],
+               inputs: Sequence[jax.Array],
                tx: Optional[optax.GradientTransformation] = None) -> 'Model':
         variables = model_def.init(*inputs)
-
-        _, params = variables.pop('params')
+        _, params = flax.core.pop(variables, 'params')
 
         if tx is not None:
             opt_state = tx.init(params)
@@ -101,14 +101,13 @@ class Model:
 
 
 def split_tree(tree, key):
-    tree_head = tree.unfreeze()
+    # Flax >= 0.7 returns plain dicts — .unfreeze() no longer exists.
+    # dict(tree) makes a shallow mutable copy without mutating the original.
+    tree_head = dict(tree)
     tree_enc = tree_head.pop(key)
-    tree_head = flax.core.FrozenDict(tree_head)
-    tree_enc = flax.core.FrozenDict(tree_enc)
     return tree_enc, tree_head
 
 
-# to separate opt_state for encoder and other layers
 @flax.struct.dataclass
 class ModelDecoupleOpt:
     step: int
@@ -124,12 +123,11 @@ class ModelDecoupleOpt:
     @classmethod
     def create(cls,
                model_def: nn.Module,
-               inputs: Sequence[jnp.ndarray],
+               inputs: Sequence[jax.Array],
                tx: Optional[optax.GradientTransformation] = None,
                tx_enc: Optional[optax.GradientTransformation] = None) -> 'ModelDecoupleOpt':
         variables = model_def.init(*inputs)
-
-        _, params = variables.pop('params')
+        _, params = flax.core.pop(variables, 'params')
 
         if tx is not None:
             if tx_enc is None:
@@ -162,7 +160,7 @@ class ModelDecoupleOpt:
 
         params_enc, params_head = split_tree(self.params, 'SharedEncoder')
         grads_enc, grads_head = split_tree(grads, 'SharedEncoder')
-        
+
         updates_enc, new_opt_state_enc = self.tx_enc.update(grads_enc, self.opt_state_enc,
                                                             params_enc)
         new_params_enc = optax.apply_updates(params_enc, updates_enc)
@@ -171,7 +169,9 @@ class ModelDecoupleOpt:
                                                           params_head)
         new_params_head = optax.apply_updates(params_head, updates_head)
 
-        new_params = flax.core.FrozenDict({**new_params_head, 'SharedEncoder': new_params_enc})
+        # Plain dict — FrozenDict wrapper removed (Flax >= 0.7)
+        new_params = {**new_params_head, 'SharedEncoder': new_params_enc}
+
         return self.replace(step=self.step + 1,
                             params=new_params,
                             opt_state_enc=new_opt_state_enc,

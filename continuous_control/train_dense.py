@@ -60,15 +60,17 @@ def main(_):
     replay_buffer_size = kwargs.pop('replay_buffer_size')
 
     agent = SACLearner(FLAGS.seed,
-                        env.observation_space.sample()[np.newaxis],
-                        env.action_space.sample()[np.newaxis], **kwargs)
-    
+                       env.observation_space.sample()[np.newaxis],
+                       env.action_space.sample()[np.newaxis], **kwargs)
+
     action_dim = env.action_space.shape[0]
     replay_buffer = ReplayBuffer(env.observation_space, action_dim,
                                  replay_buffer_size or FLAGS.max_steps)
 
     eval_returns = []
-    observation, done = env.reset(), False
+    observation, _ = env.reset()                               # CHANGE 1
+    done = False                                               # CHANGE 1
+
     for i in tqdm.tqdm(range(1, FLAGS.max_steps + 1),
                        smoothing=0.1,
                        disable=not FLAGS.tqdm):
@@ -76,19 +78,19 @@ def main(_):
             action = env.action_space.sample()
         else:
             action = agent.sample_actions(observation)
-        next_observation, reward, done, info = env.step(action)
 
-        if not done or 'TimeLimit.truncated' in info:
-            mask = 1.0
-        else:
-            mask = 0.0
+        next_observation, reward, terminated, truncated, info = env.step(action)  # CHANGE 2
+        done = terminated or truncated                                              # CHANGE 2
 
-        replay_buffer.insert(observation, action, reward, mask, float(done),
+        mask = 0.0 if terminated else 1.0                      # CHANGE 3
+        replay_buffer.insert(observation, action, reward, mask,
+                             float(terminated or truncated),   # CHANGE 3
                              next_observation)
         observation = next_observation
 
         if done:
-            observation, done = env.reset(), False
+            observation, _ = env.reset()                       # CHANGE 4
+            done = False                                       # CHANGE 4
 
         if i >= FLAGS.start_training:
             for _ in range(updates_per_step):
@@ -103,9 +105,8 @@ def main(_):
             np.savetxt(os.path.join(FLAGS.save_dir, f'{FLAGS.seed}.txt'),
                        eval_returns,
                        fmt=['%d', '%.1f'])
-            
+
         if FLAGS.resets and i % FLAGS.reset_interval == 0:
-            # create a completely new agent
             agent = SACLearner(FLAGS.seed + i,
                                env.observation_space.sample()[np.newaxis],
                                env.action_space.sample()[np.newaxis], **kwargs)

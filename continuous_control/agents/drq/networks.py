@@ -83,5 +83,4 @@ class DrQPolicy(nn.Module):
         x = nn.LayerNorm()(x)
         x = nn.tanh(x)
 
-        return NormalTanhPolicy(self.hidden_dims, self.action_dim)(x,
-                                                                   temperature)
+        return NormalTanhPolicy(self.hidden_dims, self.action_dim)(x, temperature)
