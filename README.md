@@ -1,3 +1,5 @@
+# Updated fork of evgenii-nikishin/rl_with_resets to work with python 3.12 and updated libraries
+
 # Deep RL with Resets for Addressing the Primacy Bias
 
 This repository contains a JAX implementation of the resetting mechanism from the paper 
@@ -18,7 +20,6 @@ Applying the resets to the [SAC](https://arxiv.org/abs/1812.05905), [DrQ](https:
   <img src="https://user-images.githubusercontent.com/14283069/168692757-29b2e2ba-341c-42e0-b2c0-bbd519c03f37.png" width=800>
 </p>
 
-Please cite our work if you find it useful in your research:
 ```latex
 @inproceedings{nikishin2022primacy,
   title={The Primacy Bias in Deep Reinforcement Learning},
@@ -36,7 +37,12 @@ Discrete and continuous control experiments use two different codebases.
 
 ## DeepMind Control Suite
 
-Install the necessary dependencies for SAC and DrQ algorithms using `continuous_control_requirements.txt`.
+Install the necessary dependencies for SAC and DrQ algorithms using `continuous_control_requirements.txt` and install tensorflow probability.
+
+```bash
+python pip install git+https://github.com/tensorflow/probability
+python pip install --timeout=120 -r continuous_control_requirements.txt
+```
 To train a continuous control agent with resets on a DMC task, use one of following example commands:
 
 ```bash
@@ -89,22 +95,9 @@ python -m discrete_control.train --run_number ${seed} --base_dir ${BASE_DIR}_${s
      --gin_bindings='JaxSPRAgent.replay_ratio = '"${replay_ratio}"  
 ```
 
-# Results
-
-| Method       | IQM                   | Median                | Mean                  |
-| ------------ |:---------------------:|:---------------------:|:---------------------:|
-| SAC + resets | **656**   (549,  753) | **617**   (538,  681) | **607**   (547,  667) |
-| SAC          |   501     (389,  609) |   475     (407,  563) |   484     (420,  548) |
-| DrQ + resets | **762**   (704,  815) | **680**   (625,  731) | **677**   (632,  720) |
-| DrQ          |   569     (475,  662) |   521     (470,  600) |   535     (481,  589) |
-| SPR + resets | **0.48** (0.46, 0.51) | **0.51** (0.42, 0.57) | **0.91** (0.84, 1.00) |
-| SPR          |   0.38   (0.36, 0.39) |   0.43   (0.38, 0.48) |   0.57   (0.56, 0.60) |
-
-Training curves for all agents and environments with and without resets are available in the `curves` folder.
-
 
 # Acknowledgements
-
+* Our code is based on https://github.com/evgenii-nikishin/rl_with_resets
 * Our code for continuous control experiments is based on the [JAXRL](https://github.com/ikostrikov/jaxrl) implementation of SAC and DrQ
 * The implementation of the SPR algorithm uses [Dopamine](https://github.com/google/dopamine)
 * We aggregate scores across tasks using the [rliable](https://github.com/google-research/rliable) recommendations for evaluating RL algorithms
